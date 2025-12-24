@@ -1,0 +1,19 @@
+type Transaction {
+	date: String
+	description: String
+	amount: String
+	balance: String
+}
+
+type GiftCardResult {
+	balance: String
+	cardNumber: String
+	expiryDate: String
+	purchases: String
+	transactions: [Transaction]
+}
+
+type Query {
+	checkEveryday(cardNumber: String!, pin: String!, headless: Boolean = false): GiftCardResult
+}
+
