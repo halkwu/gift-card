@@ -1,15 +1,19 @@
+scalar Date
+
 type Transaction {
-	date: String
+	date: Date
 	description: String
-	amount: String
-	balance: String
+	amount: Float
+	balance: Float
+	currency: String
 }
 
 type GiftCardResult {
-	balance: String
+	balance: Float
+	currency: String
 	cardNumber: String
 	expiryDate: String
-	purchases: String
+	purchases: Int
 	transactions: [Transaction]
 }
 

@@ -203,6 +203,60 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
       return obj;
     }
 
+    function transformResult(obj: any) {
+      if (!obj) return null;
+      const balNum = parseCurrencyToNumber(obj.balance);
+
+      function parseDateToIso(s: any): string | null {
+        if (!s) return null;
+        try {
+          const str = String(s).trim();
+          if (/no expiry/i.test(str)) return 'No expiry';
+          const mmYY = str.match(/^(\d{1,2})[\/\-](\d{2,4})$/);
+          if (mmYY) {
+            let month = parseInt(mmYY[1], 10);
+            let year = parseInt(mmYY[2], 10);
+            if (year < 100) year += year < 50 ? 2000 : 1900;
+            const d = new Date(Date.UTC(year, month - 1, 1));
+            return isNaN(d.getTime()) ? null : d.toISOString();
+          }
+          const d = new Date(str);
+          return isNaN(d.getTime()) ? null : d.toISOString();
+        } catch (e) {
+          return null;
+        }
+      }
+
+      const txs = Array.isArray(obj.transactions) ? obj.transactions.map((t: any) => ({
+        date: t && t.date ? parseDateToIso(String(t.date)) : null,
+        description: t && t.description ? String(t.description) : null,
+        amount: t && t.amount ? parseCurrencyToNumber(t.amount) : null,
+        balance: t && t.balance ? parseCurrencyToNumber(t.balance) : null,
+        currency: 'AUD',
+      })) : [];
+
+      let cardStr: string | null = null;
+      try {
+        if (obj.cardNumber) {
+          const digits = String(obj.cardNumber).replace(/\D/g, '');
+          cardStr = digits.length ? digits : null;
+        }
+      } catch (e) { cardStr = null; }
+
+      const purchasesCount = Array.isArray(txs) ? txs.length : (typeof obj.purchases === 'number' ? Math.floor(obj.purchases) : null);
+
+      const expiry = obj.expiryDate ? parseDateToIso(obj.expiryDate) : null;
+
+      return {
+        balance: Number.isNaN(balNum) ? null : balNum,
+        currency: 'AUD',
+        cardNumber: cardStr,
+        expiryDate: expiry,
+        purchases: purchasesCount,
+        transactions: txs,
+      };
+    }
+
     try {
       const locator = page.locator(resultSelector).first();
       await locator.waitFor({ timeout: 7000 });
@@ -297,7 +351,8 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
         };
       });
 
-      return attachBalances(details);
+      const raw = attachBalances(details);
+      return transformResult(raw);
     } catch (err) {
       // fallback: poll page HTML for currency pattern and try to find purchases
       let balance: string | null = null;
@@ -379,7 +434,8 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
         if (balance || purchases || cardNumber || expiryDate || transactions.length) break;
       }
       
-      return attachBalances({ balance, cardNumber, expiryDate, purchases, transactions });
+      const raw = attachBalances({ balance, cardNumber, expiryDate, purchases, transactions });
+      return transformResult(raw);
     }
   } finally {
     if (browser) {
