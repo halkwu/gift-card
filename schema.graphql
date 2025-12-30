@@ -18,6 +18,6 @@ type GiftCardResult {
 }
 
 type Query {
-	checkEveryday(cardNumber: String!, pin: String!, headless: Boolean = false): GiftCardResult
+	checkGiftCard(cardNumber: String!, pin: String!, headless: Boolean = false): GiftCardResult
 }
 

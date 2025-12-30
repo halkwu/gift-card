@@ -7,7 +7,7 @@ const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
 const resolvers = {
   Query: {
-    checkEveryday: async (_: any, args: { cardNumber: string; pin: string; headless?: boolean }) => {
+    checkGiftCard: async (_: any, args: { cardNumber: string; pin: string; headless?: boolean }) => {
       const { cardNumber, pin, headless = false } = args;
       try {
         const res = await GetResult(cardNumber, pin, headless);
