@@ -89,20 +89,166 @@ function extractBalanceFromHtml(html: string) {
 	return m ? m[0] : null;
 }
 
-export async function GetResult(cardNumber: string, pin: string, headless = false) {
+export async function GetResult(cardNumber: string, pin: string, headless = false, keepOpen = false) {
 	const url = 'https://thegoodguysgiftcards.viisolutions.com.au/';
-	let browser: Browser | null = null;
+	let browser: any = null;
+	let context: any = null;
+	let createdLocalContext = false;
+	let page: any = null;
 	try {
-		browser = await chromium.launch({ channel: 'msedge', headless });
-		const context = await browser.newContext({
-			userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
-		});
-		const page = await context.newPage();
+		// try to connect to an existing Edge/Chrome started with --remote-debugging-port=9222
 		try {
-			await page.goto(url, { waitUntil: 'domcontentloaded' });
+			try {
+				browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+				const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
+				context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
+				console.log('Connected to existing browser via CDP (http)');
+			} catch (err) {
+				console.log('Direct CDP http connect failed, trying /json/version for websocket URL...', err && (err as Error).message || err);
+				try {
+					const http = require('http');
+					const wsUrl: string = await new Promise((resolve, reject) => {
+						const req = http.get('http://127.0.0.1:9222/json/version', (res: any) => {
+							let data = '';
+							res.on('data', (chunk: any) => data += chunk);
+							res.on('end', () => {
+								try {
+									const j = JSON.parse(data);
+									if (j && j.webSocketDebuggerUrl) resolve(j.webSocketDebuggerUrl);
+									else reject(new Error('no webSocketDebuggerUrl in /json/version'));
+								} catch (e) { reject(e); }
+							});
+						});
+						req.on('error', reject);
+						req.setTimeout && req.setTimeout(5000, () => { req.abort(); reject(new Error('timeout')); });
+					});
+					if (wsUrl) {
+						browser = await chromium.connectOverCDP(wsUrl);
+						const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
+						context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
+						console.log('Connected to existing browser via CDP (websocket)');
+					}
+				} catch (err2) {
+					console.log('Failed to connect via websocket URL fallback:', err2 && (err2 as Error).message || err2);
+				}
+			}
 		} catch (e) {
-			console.error('Navigation error:', e && (e as Error).message || e);
-			return null;
+			// fall back to launching/creating context below
+		}
+
+		if (!context) {
+      // try to find a local Chrome/Edge executable to make the browser more realistic
+      // Prefer local Chrome executable first, then Edge; allow override via env vars
+      const possiblePaths = [
+        process.env.CHROME_PATH,
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        process.env.EDGE_PATH,
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
+      ].filter(Boolean) as string[];
+      let exePath: string | undefined;
+      for (const p of possiblePaths) {
+        try { const fs = require('fs'); if (fs.existsSync(p)) { exePath = p; break; } } catch (e) {}
+      }
+
+      const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'];
+
+        const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile';
+      if (exePath && !headless) {
+        // use a persistent context with the real browser executable and a stable user-data-dir
+        // this preserves cookies/login so running the script directly can use the same session
+        context = await chromium.launchPersistentContext(userDataDir, {
+          headless,
+          executablePath: exePath,
+          args: launchArgs,
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          viewport: { width: 1280, height: 800 },
+          locale: 'en-US',
+          timezoneId: 'Australia/Sydney',
+          extraHTTPHeaders: { 'accept-language': 'en-US,en;q=0.9' }
+        });
+        createdLocalContext = true;
+      } else {
+        browser = await chromium.launch({ headless, args: launchArgs, executablePath: exePath });
+        context = await browser.newContext({
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          viewport: { width: 1280, height: 800 },
+          locale: 'en-US',
+          timezoneId: 'Australia/Sydney',
+          extraHTTPHeaders: { 'accept-language': 'en-US,en;q=0.9' }
+        });
+        createdLocalContext = true;
+      }
+    } else {
+      console.log('Using existing CDP-connected browser/context; skipping launch.');
+    }
+
+    // stronger anti-detection init script
+    await context.addInitScript(() => {
+      try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
+      try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch (e) {}
+      try { Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4] }); } catch (e) {}
+      try { // @ts-ignore
+        window.chrome = window.chrome || { runtime: {} };
+      } catch (e) {}
+      try {
+        // spoof some hardware properties
+        // @ts-ignore
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+      } catch (e) {}
+      try {
+        // @ts-ignore
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+      } catch (e) {}
+      try {
+        // permissions
+        const originalQuery = (navigator as any).permissions && (navigator as any).permissions.query;
+        if (originalQuery) {
+          // @ts-ignore
+          navigator.permissions.query = (params) => (
+            params && params.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(params)
+          );
+        }
+      } catch (e) {}
+      try {
+        // @ts-ignore
+        Object.defineProperty(navigator, 'connection', { get: () => ({ effectiveType: '4g', downlink: 10, rtt: 50 }) });
+      } catch (e) {}
+    });
+
+		page = context ? await context.newPage() : null;
+		if (!page) {
+			// launch a local browser context
+			browser = await chromium.launch({ channel: 'msedge', headless });
+			context = await browser.newContext({
+				userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
+			});
+			createdLocalContext = true;
+			page = await context.newPage();
+		}
+
+		// anti-detection init
+		try {
+			await context.addInitScript(() => {
+				try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
+				try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch (e) {}
+				try { Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4] }); } catch (e) {}
+				try { // @ts-ignore
+					window.chrome = window.chrome || { runtime: {} };
+				} catch (e) {}
+			});
+		} catch (e) {}
+
+		if (createdLocalContext) {
+			try { console.log('Waiting 2s for local browser to initialize...'); } catch (e) {}
+			await new Promise(r => setTimeout(r, 2000));
+		}
+
+		try {
+			await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+		} catch (e) {
+			console.error('Navigation error (goto):', e && (e as Error).message || e);
 		}
 
 		const cardSelectors = ['#CardNumber', '#cardNumber', 'input[name*=card]', 'input[placeholder*=Card]', 'input[placeholder*=card]'];
@@ -113,6 +259,7 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 			const filledPin = await findAndFill(page, pinSelectors, pin);
 			if (!filledCard || !filledPin) {
 				console.warn('Could not find card or PIN inputs.');
+				return null;
 			}
 		} catch (e) {
 			console.error('Error filling inputs:', e && (e as Error).message || e);
@@ -126,7 +273,7 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 				await page.bringToFront();
 
 				const solvedToken = await (async () => {
-					const timeout = 5 * 60 * 1000;
+					const timeout = 5 * 60 * 1000; // 5 minutes
 					const interval = 1000;
 					const start = Date.now();
 					while (Date.now() - start < timeout) {
@@ -165,9 +312,9 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 
 		try {
 			await Promise.race([
-				page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => null),
-				page.waitForSelector('.card-balance, .balance, .balance-amount, .result, .giftcard-balance', { timeout: 15000 }).catch(() => null),
-			]);
+				page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 3000 }),
+				page.waitForSelector('.card-balance, .balance, .balance-amount, .result, .giftcard-balance', { timeout: 3000 }).catch(() => null),
+			]).catch(() => null);
 		} catch (e) {}
 
 		const html = await page.content();
@@ -188,11 +335,21 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 			raw: balanceStr,
 			cardNumber: digits,
 			url,
+			purchases: 0,
+			transactions: []
 		};
 	} finally {
-		if (browser) {
-			try { await browser.close(); } catch (e) {}
-		}
+		try {
+			if (page) {
+				try { if (!page.isClosed()) await page.close(); } catch (e) {}
+			}
+			if (!keepOpen) {
+				try { if (context) await context.close(); } catch (e) {}
+				try { if (browser && (browser.close)) await browser.close(); } catch (e) {}
+			} else {
+				try { if (context) console.log('Leaving browser/context open for inspection'); } catch (e) {}
+			}
+		} catch (e) {}
 	}
 }
 
