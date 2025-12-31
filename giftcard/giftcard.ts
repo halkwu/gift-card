@@ -31,60 +31,61 @@ export async function findAndFill(page: Page, selectors: string[], value: string
     return false;
   }
 
-  for (const sel of selectors) {
+  async function locateFirstInPageOrFrames(root: any, sel: string) {
     try {
-      const locator = page.locator(sel);
-      if ((await locator.count()) > 0) {
-        if (await tryFillWithStrategies(locator.first())) return true;
-      }
+      const locator = root.locator(sel);
+      if ((await locator.count()) > 0) return locator.first();
     } catch (e) {}
-
     try {
-      const frames = await page.frames();
+      const frames = await root.frames();
       for (const frame of frames) {
         try {
           const locator = frame.locator(sel);
-          if ((await locator.count()) > 0) {
-            if (await tryFillWithStrategies(locator.first())) return true;
-          }
+          if ((await locator.count()) > 0) return locator.first();
         } catch (ef) {}
       }
     } catch (e) {}
+    return null;
+  }
+
+  for (const sel of selectors) {
+    const locator = await locateFirstInPageOrFrames(page, sel);
+    if (locator) {
+      if (await tryFillWithStrategies(locator)) return true;
+    }
   }
   return false;
 }
 
 export async function clickFirst(page: Page, selectors: string[]) {
-  for (const sel of selectors) {
+  async function locateFirstInPageOrFrames(root: any, sel: string) {
     try {
-      const locator = page.locator(sel);
-      const count = await locator.count();
-      if (count > 0) {
-        await locator.first().click({ force: true });
-        return true;
-      }
+      const locator = root.locator(sel);
+      if ((await locator.count()) > 0) return locator.first();
     } catch (e) {}
-
     try {
-      const frames = await page.frames();
+      const frames = await root.frames();
       for (const frame of frames) {
         try {
           const locator = frame.locator(sel);
-          const count = await locator.count();
-          if (count > 0) {
-            await locator.first().click({ force: true });
-            return true;
-          }
+          if ((await locator.count()) > 0) return locator.first();
         } catch (ef) {}
       }
     } catch (e) {}
+    return null;
+  }
+
+  for (const sel of selectors) {
+    const locator = await locateFirstInPageOrFrames(page, sel);
+    if (locator) {
+      try { await locator.click({ force: true }); return true; } catch (e) {}
+    }
   }
   return false;
 }
 
 // balance and expiry extraction will be performed directly from the page table
-
-export async function GetResult(cardNumber: string, pin: string, headless = false, keepOpen = false) {
+export async function GetResult(cardNumber: string, pin: string, headless = false) {
   const url = 'https://www.giftcards.com.au/CheckBalance';
   let browser: any = null;
   let context: any = null;
@@ -327,25 +328,33 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 
     // parse transaction history table into transactions array
     let transactions: Array<any> = [];
+    async function cleanedCellText(locator: any) {
+      try {
+        return await locator.evaluate((el: HTMLElement) => {
+          const hdrs = el.querySelectorAll('.table-responsive-stack-thead');
+          let text = el.textContent || '';
+          hdrs.forEach(h => { if (h.textContent) text = text.replace(h.textContent, ''); });
+          return text.replace(/\s+/g, ' ').trim();
+        }) as string || null;
+      } catch (e) { return null; }
+    }
+
+    function parseNumFromString(s: string | null) {
+      if (!s) return null;
+      try {
+        const cleaned = s.replace(/[^0-9.\-]/g, '').replace(/,/g, '');
+        const n = parseFloat(cleaned);
+        return Number.isNaN(n) ? null : n;
+      } catch (e) { return null; }
+    }
     try {
       const rows = page.locator('#transaction-history tbody tr');
       const rowCount = await rows.count();
       for (let i = 0; i < rowCount; i++) {
         try {
           const row = rows.nth(i);
-          const dateText = await row.locator('td').nth(0).evaluate((el: HTMLElement) => {
-            const hdrs = el.querySelectorAll('.table-responsive-stack-thead');
-            let text = el.textContent || '';
-            hdrs.forEach(h => { if (h.textContent) text = text.replace(h.textContent, ''); });
-            return text.replace(/\s+/g, ' ').trim();
-          }) as string || null;
-
-          const descText = await row.locator('td').nth(1).evaluate((el: HTMLElement) => {
-            const hdrs = el.querySelectorAll('.table-responsive-stack-thead');
-            let text = el.textContent || '';
-            hdrs.forEach(h => { if (h.textContent) text = text.replace(h.textContent, ''); });
-            return text.replace(/\s+/g, ' ').trim();
-          }) as string || null;
+          const dateText = await cleanedCellText(row.locator('td').nth(0));
+          const descText = await cleanedCellText(row.locator('td').nth(1));
           // convert dateText (dd/mm/yyyy) to ISO string
           let dateIso: string | null = null;
           if (dateText) {
@@ -363,16 +372,14 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
           }
           const amountText = (await row.locator('td').nth(3).textContent())?.trim() || null;
           const balText = (await row.locator('td').nth(4).textContent())?.trim() || null;
-          let amountNum: number | null = null;
-          let balNum: number | null = null;
-          try { amountNum = parseFloat((amountText || '').replace(/[^0-9.\-]/g, '')); } catch (e) { amountNum = null; }
-          try { balNum = parseFloat((balText || '').replace(/[^0-9.\-]/g, '')); } catch (e) { balNum = null; }
+          const amountNum = parseNumFromString(amountText);
+          const balNum = parseNumFromString(balText);
           transactions.push({
             date: dateIso || dateText,
             description: descText,
             amount: amountNum,
             balance: balNum,
-            currency: (amountText && /AUD|\$/i.test(amountText)) ? 'AUD' : 'AUD'
+            currency: 'AUD'
           });
         } catch (e) {}
       }
@@ -395,16 +402,12 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
       if (page) {
         try { if (!page.isClosed()) await page.close(); } catch (e) {}
       }
-      if (!keepOpen) {
-        try {
-          if (context) await context.close();
-        } catch (e) {}
-        try {
-          if (browser && (browser.close)) await browser.close();
-        } catch (e) {}
-      } else {
-        try { if (context) console.log('Leaving browser/context open for inspection'); } catch (e) {}
-      }
+      try {
+        if (context) await context.close();
+      } catch (e) {}
+      try {
+        if (browser && browser.close) await browser.close();
+      } catch (e) {}
     } catch (e) {}
   }
 }
@@ -421,20 +424,20 @@ async function main() {
   const pin = argv[1];
   const modeArg = argv.find((a: string) => a.startsWith('--mode='));
   const headless = modeArg ? modeArg.split('=')[1] === 'headless' : false;
-  const keepOpen = argv.includes('--keep-open');
+  // Note: --keep-open removed; script always closes browser when done
 
   try {
-    const details = await GetResult(card, pin, headless, keepOpen);
+    const details = await GetResult(card, pin, headless);
     if (!details) {
       console.error(JSON.stringify({ error: 'no details returned' }));
-      console.log('Keeping browser open for inspection. Press Enter to exit.');
+      console.log('Press Enter to exit.');
       await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
       return;
     }
     console.log(JSON.stringify(details, null, 2));
   } catch (err) {
     console.error(JSON.stringify({ error: String(err) }));
-    console.log('Error occurred. Keeping browser open for inspection. Press Enter to exit.');
+    console.log('Error occurred. Press Enter to exit.');
     await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
     return;
   }

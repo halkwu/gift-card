@@ -1,5 +1,5 @@
 import { chromium } from 'playwright';
-import type { Browser, Page } from 'playwright';
+import type { Page } from 'playwright';
 
 // Minimal Node globals for TypeScript when Node types are not present
 declare const process: any;
@@ -26,70 +26,67 @@ export async function findAndFill(page: Page, selectors: string[], value: string
 				await strat(locator);
 				return true;
 			} catch (err) {
-				// try next
+				// try next strategy
 			}
 		}
 		return false;
 	}
 
-	for (const sel of selectors) {
+	async function locateFirstInPageOrFrames(root: any, sel: string) {
 		try {
-			const locator = page.locator(sel);
-			if ((await locator.count()) > 0) {
-				if (await tryFillWithStrategies(locator.first())) return true;
-			}
+			const locator = root.locator(sel);
+			if ((await locator.count()) > 0) return locator.first();
 		} catch (e) {}
-
 		try {
-			const frames = await page.frames();
+			const frames = await root.frames();
 			for (const frame of frames) {
 				try {
 					const locator = frame.locator(sel);
-					if ((await locator.count()) > 0) {
-						if (await tryFillWithStrategies(locator.first())) return true;
-					}
+					if ((await locator.count()) > 0) return locator.first();
 				} catch (ef) {}
 			}
 		} catch (e) {}
+		return null;
+	}
+
+	for (const sel of selectors) {
+		const locator = await locateFirstInPageOrFrames(page, sel);
+		if (locator) {
+			if (await tryFillWithStrategies(locator)) return true;
+		}
 	}
 	return false;
 }
 
 export async function clickFirst(page: Page, selectors: string[]) {
-	for (const sel of selectors) {
+	async function locateFirstInPageOrFrames(root: any, sel: string) {
 		try {
-			const locator = page.locator(sel);
-			const count = await locator.count();
-			if (count > 0) {
-				await locator.first().click({ force: true });
-				return true;
-			}
+			const locator = root.locator(sel);
+			if ((await locator.count()) > 0) return locator.first();
 		} catch (e) {}
-
 		try {
-			const frames = await page.frames();
+			const frames = await root.frames();
 			for (const frame of frames) {
 				try {
 					const locator = frame.locator(sel);
-					const count = await locator.count();
-					if (count > 0) {
-						await locator.first().click({ force: true });
-						return true;
-					}
+					if ((await locator.count()) > 0) return locator.first();
 				} catch (ef) {}
 			}
 		} catch (e) {}
+		return null;
+	}
+
+	for (const sel of selectors) {
+		const locator = await locateFirstInPageOrFrames(page, sel);
+		if (locator) {
+			try { await locator.click({ force: true }); return true; } catch (e) {}
+		}
 	}
 	return false;
 }
 
-function extractBalanceFromHtml(html: string) {
-	const currencyRegex = /(?:AUD|\$)\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/i;
-	const m = html.match(currencyRegex);
-	return m ? m[0] : null;
-}
 
-export async function GetResult(cardNumber: string, pin: string, headless = false, keepOpen = false) {
+export async function GetResult(cardNumber: string, pin: string, headless = false) {
 	const url = 'https://thegoodguysgiftcards.viisolutions.com.au/';
 	let browser: any = null;
 	let context: any = null;
@@ -136,39 +133,39 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 			// fall back to launching/creating context below
 		}
 
-		page = context ? await context.newPage() : null;
-		if (!page) {
-			// launch a local browser context
-			browser = await chromium.launch({ channel: 'msedge', headless });
-			context = await browser.newContext({
-				userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
-			});
-			createdLocalContext = true;
-			page = await context.newPage();
-		}
+		// page = context ? await context.newPage() : null;
+		// if (!page) {
+		// 	// launch a local browser context
+		// 	browser = await chromium.launch({ channel: 'msedge', headless });
+		// 	context = await browser.newContext({
+		// 		userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
+		// 	});
+		// 	createdLocalContext = true;
+		// 	page = await context.newPage();
+		// }
 
-		// anti-detection init
-		try {
-			await context.addInitScript(() => {
-				try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
-				try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch (e) {}
-				try { Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4] }); } catch (e) {}
-				try { // @ts-ignore
-					window.chrome = window.chrome || { runtime: {} };
-				} catch (e) {}
-			});
-		} catch (e) {}
+		// // anti-detection init
+		// try {
+		// 	await context.addInitScript(() => {
+		// 		try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
+		// 		try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch (e) {}
+		// 		try { Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4] }); } catch (e) {}
+		// 		try { // @ts-ignore
+		// 			window.chrome = window.chrome || { runtime: {} };
+		// 		} catch (e) {}
+		// 	});
+		// } catch (e) {}
 
-		if (createdLocalContext) {
-			try { console.log('Waiting 2s for local browser to initialize...'); } catch (e) {}
-			await new Promise(r => setTimeout(r, 2000));
-		}
+		// if (createdLocalContext) {
+		// 	try { console.log('Waiting 2s for local browser to initialize...'); } catch (e) {}
+		// 	await new Promise(r => setTimeout(r, 2000));
+		// }
 
-		try {
-			await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-		} catch (e) {
-			console.error('Navigation error (goto):', e && (e as Error).message || e);
-		}
+		// try {
+		// 	await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+		// } catch (e) {
+		// 	console.error('Navigation error (goto):', e && (e as Error).message || e);
+		// }
 
 		const cardSelectors = ['#CardNumber', '#cardNumber', 'input[name*=card]', 'input[placeholder*=Card]', 'input[placeholder*=card]'];
 		const pinSelectors = ['#CardPIN', '#pin', 'input[name*=pin]', 'input[placeholder*=PIN]', 'input[placeholder*=Pin]'];
@@ -236,24 +233,37 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 			]).catch(() => null);
 		} catch (e) {}
 
-		const html = await page.content();
-		const balanceStr = extractBalanceFromHtml(html);
+		let balanceStr: string | null = null;
 		let balanceNum: number | null = null;
-		if (balanceStr) {
-			try {
+		try {
+			const candidates = ['.card-balance', '.balance', '.balance-amount', '.result', '.giftcard-balance'];
+			for (const sel of candidates) {
+				try {
+					const loc = page.locator(sel);
+					if ((await loc.count()) > 0) {
+						balanceStr = (await loc.first().textContent())?.trim() || null;
+						if (balanceStr) break;
+					}
+				} catch (e) {}
+			}
+			if (!balanceStr) {
+				const html = await page.content();
+				const m = html.match(/(?:AUD|\$)\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/i);
+				if (m) balanceStr = m[0];
+			}
+			if (balanceStr) {
 				const cleaned = balanceStr.replace(/[^0-9.\-]/g, '').replace(/,/g, '');
 				const n = parseFloat(cleaned);
 				balanceNum = Number.isNaN(n) ? null : n;
-			} catch (e) { balanceNum = null; }
-		}
+			}
+		} catch (e) { balanceStr = null; balanceNum = null; }
 
 		const digits = (cardNumber || '').replace(/\D/g, '') || null;
 		return {
 			balance: balanceNum,
 			currency: balanceStr && /AUD/i.test(balanceStr) ? 'AUD' : (balanceStr && /\$/i.test(balanceStr) ? 'AUD' : 'AUD'),
-			raw: balanceStr,
 			cardNumber: digits,
-			url,
+			expiryDate: null,
 			purchases: 0,
 			transactions: []
 		};
@@ -262,34 +272,39 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 			if (page) {
 				try { if (!page.isClosed()) await page.close(); } catch (e) {}
 			}
-			if (!keepOpen) {
-				try { if (context) await context.close(); } catch (e) {}
-				try { if (browser && (browser.close)) await browser.close(); } catch (e) {}
-			} else {
-				try { if (context) console.log('Leaving browser/context open for inspection'); } catch (e) {}
-			}
+			try { if (context) await context.close(); } catch (e) {}
+			try { if (browser && browser.close) await browser.close(); } catch (e) {}
 		} catch (e) {}
 	}
 }
 
 async function main() {
 	const argv: string[] = process.argv.slice(2);
-	if (argv.length < 1) {
-		console.log('Usage: ts-node goodguy.ts <cardNumber> <pin?> [--mode=headless|headed]');
-		process.exit(1);
+	if (argv.length < 2) {
+		console.log('Usage: ts-node goodguy.ts <cardNumber> <pin> [--mode=headed]');
+		console.log('No action taken. Press Enter to exit.');
+		await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
+		return;
 	}
 	const card = argv[0];
-	const pin = argv[1] || '';
+	const pin = argv[1];
 	const modeArg = argv.find(a => a.startsWith('--mode='));
 	const headless = modeArg ? modeArg.split('=')[1] === 'headless' : false;
 
 	try {
 		const details = await GetResult(card, pin, headless);
-		if (!details) { console.error(JSON.stringify({ error: 'no details returned' })); process.exit(1); }
+		if (!details) {
+			console.error(JSON.stringify({ error: 'no details returned' }));
+			console.log('Press Enter to exit.');
+			await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
+			return;
+		}
 		console.log(JSON.stringify(details, null, 2));
 	} catch (err) {
 		console.error(JSON.stringify({ error: String(err) }));
-		process.exit(1);
+		console.log('Error occurred. Press Enter to exit.');
+		await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
+		return;
 	}
 }
 
