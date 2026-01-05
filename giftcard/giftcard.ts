@@ -1,11 +1,12 @@
 import { chromium } from 'playwright';
 import type { Page } from 'playwright';
+import { launchChrome } from './launch_chrome';
 
 declare const process: any;
 declare const require: any;
 declare const module: any;
 
-export async function findAndFill(page: Page, selectors: string[], value: string) {
+async function findAndFill(page: Page, selectors: string[], value: string) {
   async function tryFillWithStrategies(locator: any) {
     const strategies = [
       async (loc: any) => { await loc.fill(value); },
@@ -57,7 +58,7 @@ export async function findAndFill(page: Page, selectors: string[], value: string
   return false;
 }
 
-export async function clickFirst(page: Page, selectors: string[]) {
+async function clickFirst(page: Page, selectors: string[]) {
   async function locateFirstInPageOrFrames(root: any, sel: string) {
     try {
       const locator = root.locator(sel);
@@ -108,140 +109,68 @@ export async function clickFirst(page: Page, selectors: string[]) {
   return false;
 }
 
+function parseNumFromString(s: string | null) {
+      if (!s) return null;
+      try {
+        const cleaned = s.replace(/[^0-9.\-]/g, '').replace(/,/g, '');
+        const n = parseFloat(cleaned);
+        return Number.isNaN(n) ? null : n;
+      } catch (e) { return null; }
+    }
+
+async function cleanedCellText(locator: any) {
+  try {
+    return await locator.evaluate((el: HTMLElement) => {
+      const hdrs = el.querySelectorAll('.table-responsive-stack-thead');
+      let text = el.textContent || '';
+      hdrs.forEach(h => { if (h.textContent) text = text.replace(h.textContent, ''); });
+      return text.replace(/\s+/g, ' ').trim();
+    }) as string || null;
+  } catch (e) { return null; }
+}
+
 // balance and expiry extraction will be performed directly from the page table
 export async function GetResult(cardNumber: string, pin: string, headless = false) {
   const url = 'https://www.giftcards.com.au/CheckBalance';
   let browser: any = null;
   let context: any = null;
-  let createdLocalContext = false;
   let page: any = null;
+  let connectedOverCDP = false;
+  let launchedPid: number | null = null;
   try {
-    // try to connect to an existing Edge/Chrome started with --remote-debugging-port=9222
-    try {
+    // If not running in headless mode, try to launch a local Chrome with remote-debugging enabled
+    if (!headless) {
       try {
-        browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
-        const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
-        context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
-        console.log('Connected to existing browser via CDP (http)');
-      } catch (err) {
-        console.log('Direct CDP http connect failed, trying /json/version for websocket URL...', err && (err as Error).message || err);
+        const exePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+        const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile';
         try {
-          const http = require('http');
-          const wsUrl: string = await new Promise((resolve, reject) => {
-            const req = http.get('http://127.0.0.1:9222/json/version', (res: any) => {
-              let data = '';
-              res.on('data', (chunk: any) => data += chunk);
-              res.on('end', () => {
-                try {
-                  const j = JSON.parse(data);
-                  if (j && j.webSocketDebuggerUrl) resolve(j.webSocketDebuggerUrl);
-                  else reject(new Error('no webSocketDebuggerUrl in /json/version'));
-                } catch (e) { reject(e); }
-              });
-            });
-            req.on('error', reject);
-            req.setTimeout && req.setTimeout(5000, () => { req.abort(); reject(new Error('timeout')); });
-          });
-          if (wsUrl) {
-            browser = await chromium.connectOverCDP(wsUrl);
-            const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
-            context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
-            console.log('Connected to existing browser via CDP (websocket)');
-          }
-        } catch (err2) {
-          console.log('Failed to connect via websocket URL fallback:', err2 && (err2 as Error).message || err2);
+          launchedPid = launchChrome(exePath, userDataDir, 9222);
+          if (launchedPid) console.log(`Launched Chrome (pid=${launchedPid}), waiting for CDP...`);
+          else console.log('launchChrome returned no pid; attempting to connect to CDP.');
+        } catch (e) {
+          console.error('Error invoking launchChrome:', e);
+        }
+      } catch (e) {
+        console.error('Error preparing to launch Chrome:', e);
+      }
+
+      const start = Date.now();
+      const timeout = 10000;
+      while (Date.now() - start < timeout) {
+        try {
+          browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+          connectedOverCDP = true;
+          break;
+        } catch (e) {
+          await new Promise(r => setTimeout(r, 500));
         }
       }
-    } catch (e) {
-      // fall back to launching/creating context below
     }
+    const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
+    context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
+    console.log('Connected to existing browser via CDP (http)');
 
-    // if (!context) {
-    //   // try to find a local Chrome/Edge executable to make the browser more realistic
-    //   const possiblePaths = [
-    //     process.env.CHROME_PATH,
-    //     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    //     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    //     process.env.EDGE_PATH,
-    //     'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    //     'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
-    //   ].filter(Boolean) as string[];
-    //   let exePath: string | undefined;
-    //   for (const p of possiblePaths) {
-    //     try { const fs = require('fs'); if (fs.existsSync(p)) { exePath = p; break; } } catch (e) {}
-    //   }
-
-    //   const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'];
-
-    //     const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile';
-    //   if (exePath && !headless) {
-    //     // use a persistent context with the real browser executable and a stable user-data-dir
-    //     // this preserves cookies/login so running the script directly can use the same session
-    //     context = await chromium.launchPersistentContext(userDataDir, {
-    //       headless,
-    //       executablePath: exePath,
-    //       args: launchArgs,
-    //       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    //       viewport: { width: 1280, height: 800 },
-    //       locale: 'en-US',
-    //       timezoneId: 'Australia/Sydney',
-    //       extraHTTPHeaders: { 'accept-language': 'en-US,en;q=0.9' }
-    //     });
-    //     createdLocalContext = true;
-    //   } else {
-    //     browser = await chromium.launch({ headless, args: launchArgs, executablePath: exePath });
-    //     context = await browser.newContext({
-    //       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    //       viewport: { width: 1280, height: 800 },
-    //       locale: 'en-US',
-    //       timezoneId: 'Australia/Sydney',
-    //       extraHTTPHeaders: { 'accept-language': 'en-US,en;q=0.9' }
-    //     });
-    //     createdLocalContext = true;
-    //   }
-    // } else {
-    //   console.log('Using existing CDP-connected browser/context; skipping launch.');
-    // }
-
-    // stronger anti-detection init script
-    await context.addInitScript(() => {
-      try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
-      try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch (e) {}
-      try { Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4] }); } catch (e) {}
-      try { // @ts-ignore
-        window.chrome = window.chrome || { runtime: {} };
-      } catch (e) {}
-      try {
-        // spoof some hardware properties
-        // @ts-ignore
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-      } catch (e) {}
-      try {
-        // @ts-ignore
-        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-      } catch (e) {}
-      try {
-        // permissions
-        const originalQuery = (navigator as any).permissions && (navigator as any).permissions.query;
-        if (originalQuery) {
-          // @ts-ignore
-          navigator.permissions.query = (params) => (
-            params && params.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(params)
-          );
-        }
-      } catch (e) {}
-      try {
-        // @ts-ignore
-        Object.defineProperty(navigator, 'connection', { get: () => ({ effectiveType: '4g', downlink: 10, rtt: 50 }) });
-      } catch (e) {}
-    });
-
-    
     page = await context.newPage();
-    if (createdLocalContext) {
-      try { console.log('Waiting 5s for local browser to initialize...'); } catch (e) {}
-      await new Promise(r => setTimeout(r, 5000));
-    }
     let gotoResponse: any = null;
     try {
       try {
@@ -249,7 +178,6 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
       } catch (e) {
         console.error('Navigation error (goto):', e && (e as Error).message || e);
       }
-      // save diagnostic artifacts for inspection
       // navigation completed; no debug artifacts will be written
     } catch (e) {
       console.error('Navigation error:', e && (e as Error).message || e);
@@ -278,6 +206,39 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
         console.log('Detected reCAPTCHA. Please complete it in the opened browser window.');
         await page.bringToFront();
 
+        // inject visual highlight and label for reCAPTCHA elements to help manual solving
+        try {
+          await page.evaluate(() => {
+            try {
+              if (!document.getElementById('__gc_recaptcha_highlight')) {
+                const style = document.createElement('style');
+                style.id = '__gc_recaptcha_highlight';
+                style.textContent = '\n.__gc_recaptcha_highlight { position: relative !important; box-shadow: 0 0 0 4px rgba(255,165,0,0.95) !important; outline: 4px solid rgba(255,165,0,0.9) !important; z-index: 9999999 !important; transition: box-shadow 0.3s ease; }\n.__gc_recaptcha_pulse { animation: __gc_pulse 1.5s infinite; }\n@keyframes __gc_pulse { 0% { box-shadow: 0 0 0 0 rgba(255,165,0,0.9); } 70% { box-shadow: 0 0 0 8px rgba(255,165,0,0); } 100% { box-shadow: 0 0 0 0 rgba(255,165,0,0); } }\n.__gc_recaptcha_label { position: absolute; top: -28px; left: 0; background: rgba(255,165,0,0.95); color: #000; padding: 4px 8px; font-weight: 600; border-radius: 4px; z-index: 10000000; font-family: sans-serif; font-size: 12px; }\n';
+                document.head.appendChild(style);
+              }
+            } catch (e) {}
+            const nodes = Array.from(document.querySelectorAll('.g-recaptcha, iframe[src*="recaptcha"]'));
+            nodes.forEach((el, idx) => {
+              try {
+                const he = el as HTMLElement;
+                he.classList.add('__gc_recaptcha_highlight', '__gc_recaptcha_pulse');
+                try {
+                  if (!he.querySelector('.__gc_recaptcha_label')) {
+                    const label = document.createElement('div');
+                    label.className = '__gc_recaptcha_label';
+                    label.textContent = 'reCAPTCHA — please solve';
+                    // ensure the container can position the label
+                    const cs = getComputedStyle(he);
+                    if (cs.position === 'static' || !cs.position) he.style.position = 'relative';
+                    he.appendChild(label);
+                  }
+                } catch (e) {}
+                try { he.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' }); } catch (e) {}
+              } catch (e) {}
+            });
+          });
+        } catch (e) {}
+
         const solvedToken = await (async () => {
           const timeout = 5 * 60 * 1000; // 5 minutes
           const interval = 1000;
@@ -304,16 +265,12 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
         })();
 
         if (!solvedToken) console.log('Timeout waiting for reCAPTCHA; will submit the form anyway.');
-        else console.log('reCAPTCHA solved; submitting form...');
+        else 
+          console.log('reCAPTCHA solved; submitting form...');
+          await clickFirst(page, ['button[type=submit]', 'input[type=submit]', 'button:has-text("Check balance")', 'button']);
       }
     } catch (e) {
       console.error('Error handling reCAPTCHA detection:', e && (e as Error).message || e);
-    }
-
-    try {
-      await clickFirst(page, ['button[type=submit]', 'input[type=submit]', 'button:has-text("Check balance")', 'button']);
-    } catch (e) {
-      console.error('Error clicking submit:', e && (e as Error).message || e);
     }
 
     try {
@@ -322,7 +279,6 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
         page.waitForSelector('.card-balance, .balance, .balance-amount', { timeout: 3000 }).catch(() => null),
       ]);
     } catch (e) {
-      // non-fatal
     }
 
     // try to extract balance and expiry date from the gift card summary table
@@ -351,25 +307,6 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 
     // parse transaction history table into transactions array
     let transactions: Array<any> = [];
-    async function cleanedCellText(locator: any) {
-      try {
-        return await locator.evaluate((el: HTMLElement) => {
-          const hdrs = el.querySelectorAll('.table-responsive-stack-thead');
-          let text = el.textContent || '';
-          hdrs.forEach(h => { if (h.textContent) text = text.replace(h.textContent, ''); });
-          return text.replace(/\s+/g, ' ').trim();
-        }) as string || null;
-      } catch (e) { return null; }
-    }
-
-    function parseNumFromString(s: string | null) {
-      if (!s) return null;
-      try {
-        const cleaned = s.replace(/[^0-9.\-]/g, '').replace(/,/g, '');
-        const n = parseFloat(cleaned);
-        return Number.isNaN(n) ? null : n;
-      } catch (e) { return null; }
-    }
     try {
       const rows = page.locator('#transaction-history tbody tr');
       const rowCount = await rows.count();
@@ -413,28 +350,26 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
     const digits = (cardNumber || '').replace(/\D/g, '') || null;
     return {
       balance: balanceNum,
-      currency: balanceStr && /AUD/i.test(balanceStr) ? 'AUD' : (balanceStr && /\$/i.test(balanceStr) ? 'AUD' : 'AUD'),
+      currency: 'AUD',
       cardNumber: digits,
       expiryDate: expiryDateStr,
       purchases: transactions.length,
       transactions: transactions
     };
   } finally {
-    // close page/context/browser unless user requested to keep open
-    try {
-      if (page) {
-        try { if (!page.isClosed()) await page.close(); } catch (e) {}
-      }
-    } catch (e) {}
-    try {
-      if (context) {
-        try { await context.close(); } catch (e) {}
-      }
-    } catch (e) {}
-
     try {
       if (browser) {
-        try { await browser.close(); } catch (e) {}
+          if (connectedOverCDP) {
+            if ((browser as any).disconnect) {
+              await (browser as any).disconnect(); 
+            }
+            if (launchedPid) {
+              try {
+                const cp = require('child_process');
+                cp.execSync(`taskkill /PID ${launchedPid} /T /F`);
+              } catch (e) {}
+            }
+          }
       }
     } catch (e) {}
   }
@@ -443,7 +378,7 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 async function main() {
   const argv: string[] = process.argv.slice(2);
   if (argv.length < 2) {
-    console.log('Usage: ts-node giftcard.ts <cardNumber> <pin> [--mode=headed]');
+    console.log('Usage: ts-node giftcard.ts <cardNumber> <pin>');
     await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
     return;
   }

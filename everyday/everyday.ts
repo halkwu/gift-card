@@ -1,7 +1,7 @@
 import { firefox, Browser, Page } from 'playwright';
 
 
-export async function findAndFill(page: Page, selectors: string[], value: string) {
+async function findAndFill(page: Page, selectors: string[], value: string) {
   async function tryFillWithStrategies(locator: any) {
     const strategies = [
       async (loc: any) => { await loc.fill(value); },
@@ -53,7 +53,7 @@ export async function findAndFill(page: Page, selectors: string[], value: string
   return false;
 }
 
-export async function clickFirst(page: Page, selectors: string[]) {
+async function clickFirst(page: Page, selectors: string[]) {
   async function locateFirstInPageOrFrames(root: any, sel: string) {
     try {
       const locator = root.locator(sel);
@@ -101,54 +101,6 @@ export async function clickFirst(page: Page, selectors: string[]) {
   return false;
 }
 
-export async function GetResult(cardNumber: string, pin: string, headless: boolean) {
-  const url = 'https://www.everyday.com.au/gift-cards/check-balance';
-  let browser: Browser | null = null;
-  let page: Page | null = null;
-  try {
-    browser = await firefox.launch({ headless, firefoxUserPrefs: { 'network.http.http2.enabled': false } });
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    });
-    page = await context.newPage();
-    await page.goto(url, { waitUntil: 'domcontentloaded' });
-
-  const cardSelectors = [
-    '#giftCardNumber',
-    '#cardNumber',
-    'input[name="cardNumber"]',
-    'input[name*="card"]',
-    'input[placeholder*="Card"]',
-    'input[placeholder*="card"]',
-  ];
-
-    const pinSelectors = [
-      '#access-code',
-      '#access_code',
-      '#accesscode',
-      '#accessCode',
-    ];
-
-    const filledCard = await findAndFill(page, cardSelectors, cardNumber);
-    const filledPin = await findAndFill(page, pinSelectors, pin);
-
-    if (!filledCard || !filledPin) {
-      console.warn('Could not find card number and/or PIN inputs automatically.');
-      return null;
-    }
-
-    const buttonSelectors = [
-    'button:has-text("Check balance")',
-    'button:has-text("Check Balance")',
-  ];
-
-    const clicked = await clickFirst(page, buttonSelectors);
-    if (!clicked) {
-      console.warn('Could not find a check balance button to click.');
-      return null;
-    }
-
-    // helper functions reused by both DOM-extraction and HTML-fallback
     function parseCurrencyToNumber(s: any) {
       if (s === null || s === undefined) return NaN;
       try {
@@ -222,7 +174,7 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
 
       let cardStr: string | null = null;
       try {
-        const digits = String(cardNumber || '').replace(/\D/g, '');
+        const digits = String(obj.cardNumber || '').replace(/\D/g, '');
         cardStr = digits.length ? digits : null;
       } catch (e) { cardStr = null; }
 
@@ -237,6 +189,53 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
         purchases: purchasesCount,
         transactions: txs,
       };
+    }
+
+export async function GetResult(cardNumber: string, pin: string, headless: boolean) {
+  const url = 'https://www.everyday.com.au/gift-cards/check-balance';
+  let browser: Browser | null = null;
+  let page: Page | null = null;
+  try {
+    browser = await firefox.launch({ headless, firefoxUserPrefs: { 'network.http.http2.enabled': false } });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+    page = await context.newPage();
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+
+  const cardSelectors = [
+    '#giftCardNumber',
+    '#cardNumber',
+    'input[name="cardNumber"]',
+    'input[name*="card"]',
+    'input[placeholder*="Card"]',
+    'input[placeholder*="card"]',
+  ];
+
+    const pinSelectors = [
+      '#access-code',
+      '#access_code',
+      '#accesscode',
+      '#accessCode',
+    ];
+
+    const filledCard = await findAndFill(page, cardSelectors, cardNumber);
+    const filledPin = await findAndFill(page, pinSelectors, pin);
+
+    if (!filledCard || !filledPin) {
+      console.warn('Could not find card number and/or PIN inputs automatically.');
+      return null;
+    }
+
+    const buttonSelectors = [
+    'button:has-text("Check balance")',
+    'button:has-text("Check Balance")',
+  ];
+
+    const clicked = await clickFirst(page, buttonSelectors);
+    if (!clicked) {
+      console.warn('Could not find a check balance button to click.');
+      return null;
     }
 
     try {
