@@ -30,8 +30,7 @@ npm install
 
 ```bash
 # Example: start the GraphQL server
-New-Item -ItemType Directory -Path 'C:\pw-chrome-profile' -Force ; Get-ChildItem 'C:\pw-chrome-profile' | Select-Object FullName, Attributes
-Start-Process -FilePath 'C:\Program Files\Google\Chrome\Application\chrome.exe' -ArgumentList '--remote-debugging-port=9222','--user-data-dir=C:\pw-chrome-profile' -WindowStyle Normal
+Remove-Item 'C:\pw-chrome-profile' -Recurse -Force -ErrorAction SilentlyContinue ; New-Item -ItemType Directory -Path 'C:\pw-chrome-profile' -Force ; Get-ChildItem 'C:\pw-chrome-profile' | Select-Object FullName, Attributes
 cd giftcard
 npx ts-node giftcard_api.ts
 ```

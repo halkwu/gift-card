@@ -2,7 +2,6 @@ import { firefox, Browser, Page } from 'playwright';
 
 
 export async function findAndFill(page: Page, selectors: string[], value: string) {
-  // unified small helpers to try several strategies against a locator
   async function tryFillWithStrategies(locator: any) {
     const strategies = [
       async (loc: any) => { await loc.fill(value); },
@@ -28,66 +27,75 @@ export async function findAndFill(page: Page, selectors: string[], value: string
     return false;
   }
 
-  // search on page and inside frames for the first matching selector
-  for (const sel of selectors) {
-    // try main page
+  async function locateFirstInPageOrFrames(root: any, sel: string) {
     try {
-      const locator = page.locator(sel);
-      if ((await locator.count()) > 0) {
-        if (await tryFillWithStrategies(locator.first())) return true;
-      }
-    } catch (e) {
-      // ignore and try frames
-    }
-
-    // try frames
+      const locator = root.locator(sel);
+      if ((await locator.count()) > 0) return locator.first();
+    } catch (e) {}
     try {
-      const frames = await page.frames();
+      const frames = await root.frames();
       for (const frame of frames) {
         try {
           const locator = frame.locator(sel);
-          if ((await locator.count()) > 0) {
-            if (await tryFillWithStrategies(locator.first())) return true;
-          }
-        } catch (ef) {
-          // ignore and continue
-        }
+          if ((await locator.count()) > 0) return locator.first();
+        } catch (ef) {}
       }
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
+    return null;
   }
 
+  for (const sel of selectors) {
+    const locator = await locateFirstInPageOrFrames(page, sel);
+    if (locator) {
+      if (await tryFillWithStrategies(locator)) return true;
+    }
+  }
   return false;
 }
 
 export async function clickFirst(page: Page, selectors: string[]) {
-  for (const sel of selectors) {
+  async function locateFirstInPageOrFrames(root: any, sel: string) {
     try {
-      const locator = page.locator(sel);
-      const count = await locator.count();
-      if (count > 0) {
-        await locator.first().click({ force: true });
-        return true;
-      }
-    } catch (e) {
-    }
-
-    // try frames
+      const locator = root.locator(sel);
+      if ((await locator.count()) > 0) return locator.first();
+    } catch (e) {}
     try {
-      const frames = await page.frames();
+      const frames = await root.frames();
       for (const frame of frames) {
         try {
           const locator = frame.locator(sel);
-          const count = await locator.count();
-          if (count > 0) {
-            await locator.first().click({ force: true });
-            return true;
-          }
-        } catch (ef) {
+          if ((await locator.count()) > 0) return locator.first();
+        } catch (ef) {}
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  for (const sel of selectors) {
+    const locator = await locateFirstInPageOrFrames(page, sel);
+    if (locator) {
+      // Try a set of click strategies to handle flaky buttons
+      const strategies = [
+        async (loc: any) => { await loc.scrollIntoViewIfNeeded(); await loc.click({ force: true }); },
+        async (loc: any) => { await loc.evaluate((el: HTMLElement) => (el as HTMLElement).click()); },
+        async (loc: any) => { await loc.focus(); await page.keyboard.press('Enter'); },
+        async (loc: any) => { await loc.click(); },
+      ];
+      for (const strat of strategies) {
+        try {
+          await strat(locator);
+          return true;
+        } catch (e) {
+          try { await new Promise(r => setTimeout(r, 150)); } catch (ee) {}
         }
       }
-    } catch (e) {
+      try {
+        await page.evaluate((s) => {
+          const el = document.querySelector(s) as HTMLElement | null;
+          if (el) el.click();
+        }, sel);
+        return true;
+      } catch (e) {}
     }
   }
   return false;
@@ -115,26 +123,10 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
   ];
 
     const pinSelectors = [
-      '#giftCardPin',
-      '#cardPIN',
-      '#pin',
-      'input[name*="pin"]',
-      'input[placeholder*="PIN"]',
-      'input[placeholder*="Pin"]',
       '#access-code',
       '#access_code',
       '#accesscode',
       '#accessCode',
-      '#access',
-      '#code',
-      'input[name*="access"]',
-      'input[name*="code"]',
-      'input[placeholder*="Access"]',
-      'input[placeholder*="access"]',
-      'input[placeholder*="Code"]',
-      'input[placeholder*="code"]',
-      'input[aria-label*="access"]',
-      'input[aria-label*="code"]',
     ];
 
     const filledCard = await findAndFill(page, cardSelectors, cardNumber);
@@ -148,9 +140,6 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
     const buttonSelectors = [
     'button:has-text("Check balance")',
     'button:has-text("Check Balance")',
-    'button[type="submit"]',
-    'input[type="submit"]',
-    'button',
   ];
 
     const clicked = await clickFirst(page, buttonSelectors);
@@ -158,9 +147,6 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
       console.warn('Could not find a check balance button to click.');
       return null;
     }
-
-    // Wait for the specific result container and extract details from it
-    const resultSelector = 'div.gift-card-balance-result-component_giftCardBalnceSection__sQJ__';
 
     // helper functions reused by both DOM-extraction and HTML-fallback
     function parseCurrencyToNumber(s: any) {
@@ -178,8 +164,7 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
     function formatCurrency(n: number, sample?: string) {
       if (typeof n !== 'number' || Number.isNaN(n)) return null;
       const useAUD = sample && /AUD/i.test(sample);
-      const useDollar = sample && /\$/.test(sample);
-      const symbol = useAUD ? 'AUD ' : (useDollar ? '$' : (sample ? (sample.match(/^[^0-9\s]*/)||[''])[0] : '$'));
+      const symbol = useAUD ? 'AUD ' : (sample ? (sample.match(/^[^0-9\s]*/)||[''])[0] : '$');
       const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(n));
       return (n < 0 ? '-' : '') + symbol + formatted;
     }
@@ -237,14 +222,11 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
 
       let cardStr: string | null = null;
       try {
-        if (obj.cardNumber) {
-          const digits = String(obj.cardNumber).replace(/\D/g, '');
-          cardStr = digits.length ? digits : null;
-        }
+        const digits = String(cardNumber || '').replace(/\D/g, '');
+        cardStr = digits.length ? digits : null;
       } catch (e) { cardStr = null; }
 
       const purchasesCount = Array.isArray(txs) ? txs.length : (typeof obj.purchases === 'number' ? Math.floor(obj.purchases) : null);
-
       const expiry = obj.expiryDate ? parseDateToIso(obj.expiryDate) : null;
 
       return {
@@ -258,103 +240,7 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
     }
 
     try {
-      const locator = page.locator(resultSelector).first();
-      await locator.waitFor({ timeout: 7000 });
-      const details = await locator.evaluate((el: HTMLElement) => {
-        const text = (el.innerText || el.textContent || '').trim();
-        const balanceMatch = text.match(/(?:AUD|\$)\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/i);
-        const cardMatch = text.match(/\b\d{15,19}\b/);
-        const expiryMatch = text.match(/(No expiry|No Expiry|No expiry date|Expires?:?\s*\d{1,2}\/\d{2,4}|Expiry date:?\s*.+)/i);
-        // Prefer aria-label values when available (some sites include 'is' in aria-label)
-        let cardFromAria: string | null = null;
-        try {
-          const cardAriaEl = el.querySelector('[aria-label*="Gift card number"], [aria-label*="gift card number"]');
-          if (cardAriaEl) {
-            const al = (cardAriaEl.getAttribute('aria-label') || '').trim();
-            const cm = al.match(/\b\d{15,19}\b/);
-            if (cm) cardFromAria = cm[0].trim();
-          }
-        } catch (e) {
-          cardFromAria = null;
-        }
-        let expiryFromAria: string | null = null;
-        try {
-          const expAriaEl = el.querySelector('[aria-label*="Expiry date"], [aria-label*="expiry date"]');
-          if (expAriaEl) {
-            const al = (expAriaEl.getAttribute('aria-label') || '').trim();
-            const m = al.match(/(?:is|:)\s*(.+)$/i);
-            if (m) expiryFromAria = m[1].trim();
-            else if (/no expiry/i.test(al)) expiryFromAria = 'No expiry';
-          }
-        } catch (e) {
-          expiryFromAria = null;
-        }
-        // Prefer the content inside a <b> element if present (e.g. <b>No expiry</b>)
-        let expiryBText: string | null = null;
-        try {
-          const bEl = el.querySelector('[aria-label*="Expiry date"] b') || el.querySelector('[aria-label*="expiry date"] b') || Array.from(el.querySelectorAll('div,section,span')).map(n => n.querySelector('b')).find(x => x && /expiry date/i.test((x.parentElement && x.parentElement.textContent) || '')) || null;
-          if (bEl) expiryBText = (bEl.textContent || '').trim();
-        } catch (e) {
-          expiryBText = null;
-        }
-        // Try to extract 'Total purchases to date' from known child containers or span
-        let purchases: string | null = null;
-        try {
-          const purchSpan = el.querySelector('.gift-card-balance-result_component_purchasesSectionValue__FipjX');
-          if (purchSpan) {
-            purchases = (purchSpan.textContent || '').trim();
-          }
-          if (!purchases) {
-            const purchEl = el.querySelector('.gift-card-balance-result_component_balancePurchaseContainer__EP8o_');
-            if (purchEl) {
-              const pText = (purchEl.textContent || '').trim();
-              const pMatch = pText.match(/Total purchases to date[:\s]*((?:AUD|\$)?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i);
-              purchases = pMatch ? pMatch[1].trim() : (pText.match(/(?:AUD|\$)\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/) || [null])[0];
-            }
-          }
-        } catch (e) {
-          purchases = null;
-        }
-        // normalize expiry value, prefer <b> content, then aria, then text match
-        let expiryNormalized: string | null = null;
-        if (expiryBText) expiryNormalized = expiryBText.replace(/Expiry date:?|Expiry:?|Expires?:?|is:?/ig, '').trim();
-        else if (expiryFromAria) expiryNormalized = expiryFromAria.replace(/Expiry date:?|Expiry:?|Expires?:?|is:?/ig, '').trim();
-        else if (expiryMatch) expiryNormalized = expiryMatch[0].replace(/Expiry date:?|Expiry:?|Expires?:?|is:?/ig, '').trim();
-        if (expiryNormalized && /no expiry/i.test(expiryNormalized)) expiryNormalized = 'No expiry';
-
-        // Extract transactions: group by date, then for each transaction item capture description and amount
-        let transactions: Array<{date: string | null, description: string | null, amount: string | null}> = [];
-        try {
-          const groups = Array.from(el.querySelectorAll('.gift-card-balance-result_component_transactionGroup__LfnCW'));
-          for (const g of groups) {
-            const dateEl = g.querySelector('.gift-card-balance-result_component_transactionDate__p1q9q');
-            const dateText = dateEl ? (dateEl.textContent || '').trim() : null;
-            const items = Array.from(g.querySelectorAll('.gift-card-balance-result_component_transactionItem__wMoe3'));
-            for (const it of items) {
-              const descEl = it.querySelector('.core-body-lg-default') || it.querySelector('span');
-              const amountEl = it.querySelector('.core-title-lg-default') || Array.from(it.querySelectorAll('span')).pop();
-              const desc = descEl ? (descEl.textContent || '').trim() : null;
-              const amount = amountEl ? (amountEl.textContent || '').trim() : null;
-              transactions.push({ date: dateText, description: desc, amount });
-            }
-          }
-        } catch (e) {
-          transactions = [];
-        }
-
-        return {
-          balance: balanceMatch ? balanceMatch[0].trim() : null,
-          cardNumber: cardFromAria || (cardMatch ? cardMatch[0].trim() : null),
-          expiryDate: expiryNormalized,
-          purchases,
-          transactions,
-        };
-      });
-
-      const raw = attachBalances(details);
-      return transformResult(raw);
-    } catch (err) {
-      // fallback: poll page HTML for currency pattern and try to find purchases
+      await page.waitForLoadState('networkidle', { timeout: 10000 });
       let balance: string | null = null;
       let purchases: string | null = null;
       let cardNumber: string | null = null;
@@ -365,65 +251,51 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
         await page.waitForTimeout(500);
         const html = await page.content();
         // inline currency extraction (replacing removed extractBalanceFromHtml)
-        const _currencyRegex = /(?:AUD|\$)\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/g;
+        const _currencyRegex = /(?:AUD|\$)\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?/gi;
         const _matches = html.match(_currencyRegex);
         balance = _matches ? _matches[0] : null;
 
         if (!cardNumber) {
           const cm = html.match(/\b\d{15,19}\b/);
           if (cm) cardNumber = cm[0].trim();
-          // try aria-label for card number
           if (!cardNumber) {
-            const ariaCard = html.match(/aria-label=["'][^"']*Gift card number[^"']*(\d{15,19})[^"']*["']/i);
+            const ariaCard = html.match(/aria-label=["'][^"']*gift\s*card(?:\s*number)?[^"']*(\d{15,19})/i);
             if (ariaCard) cardNumber = ariaCard[1].trim();
           }
         }
 
+        if (!expiryDate) {
+          // try bolded expiry, aria-label, or inline text (No expiry | mm/yy | full date)
+          const bHtmlMatch = html.match(/<b[^>]*>(No expiry|Expires?|Expiry[:\s]*[^\<]+|\d{1,2}[\/\-]\d{2,4})<\/b>/i);
+          if (bHtmlMatch) expiryDate = bHtmlMatch[1].trim();
           if (!expiryDate) {
-          // try to capture <b> content inside an expiry div: <div aria-label="Expiry date is No expiry">Expiry date: <b>No expiry</b></div>
-          const bHtmlMatch = html.match(/<div[^>]*aria-label=["'][^"']*Expiry date[^"']*["'][^>]*>[^<]*<b>([^<]+)<\/b>/i);
-          if (bHtmlMatch) {
-            expiryDate = bHtmlMatch[1].trim();
+            const anyExp = html.match(/(?:No expiry|Expires?:\s*\d{1,2}\/\d{2,4}|Expiry(?: date)?:\s*[^<\n\r]+)/i);
+            if (anyExp) expiryDate = anyExp[0].replace(/Expiry date:?|Expiry:?|Expires?:?|is:?/ig, '').trim();
           }
-          // fallback to general expiry text match
           if (!expiryDate) {
-            const em = html.match(/(No expiry|No Expiry|No expiry date|Expires?:?\s*\d{1,2}\/\d{2,4}|Expiry date:?\s*.+)/i);
-            if (em) expiryDate = em[0].replace(/Expiry date:?|Expiry:?|Expires?:?|is:?/ig, '').trim();
-          }
-          // try aria-label pattern if still not found
-          if (!expiryDate) {
-            const ariaExp = html.match(/aria-label=["'][^"']*Expiry date[^"']*(?:is|:)\s*([^"']+)[^"']*["']/i);
+            const ariaExp = html.match(/aria-label=["'][^"']*expiry date[^"']*(?:is|:)?\s*([^"']+)["']/i);
             if (ariaExp) expiryDate = ariaExp[1].trim();
           }
           if (expiryDate && /no expiry/i.test(expiryDate)) expiryDate = 'No expiry';
         }
 
         if (!purchases) {
-          const pm = html.match(/Total purchases to date[:\s]*((?:AUD|\$)?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i);
-          if (pm) purchases = pm[1].trim();
-          // also try to locate the span value directly in the HTML
-          if (!purchases) {
-            const spanMatch = html.match(/<span[^>]*class=["'][^"']*purchasesSectionValue__FipjX[^"']*["'][^>]*>([^<]+)<\/span>/i);
-            if (spanMatch) purchases = spanMatch[1].trim();
-          }
+          const pm = html.match(/Total purchases to date[:\s]*((?:AUD|\$)?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i)
+                    || html.match(/<span[^>]*class=["'][^"']*purchasesSectionValue[^"']*["'][^>]*>([^<]+)<\/span>/i);
+          if (pm) purchases = pm[1] ? pm[1].trim() : pm[0].trim();
         }
 
-        // fallback: try to parse transactions from HTML when DOM extraction fails
+        // transactions: looser, less brittle patterns
         transactions = [];
         try {
-          const dateRegex = /<span[^>]*class=["'][^"']*transactionDate__p1q9q[^"']*["'][^>]*>([^<]+)<\/span>/gi;
-          const itemRegex = /<div[^>]*transactionItem__wMoe3[^>]*>.*?<span[^>]*class=["'][^"']*core-body-lg-default[^"']*["'][^>]*>([^<]+)<\/span>.*?<span[^>]*class=["'][^"']*core-title-lg-default[^"']*["'][^>]*>([^<]+)<\/span>/gsi;
+          const dateRegex = /<[^>]*class=["'][^"']*transactionDate[^"']*["'][^>]*>\s*([^<]+)\s*<\/[^>]+>/gi;
+          const itemRegex = /<[^>]*class=["'][^"']*transactionItem[^"']*["'][^>]*>[\s\S]*?<span[^>]*class=["'][^"']*core-body[^"']*["'][^>]*>\s*([^<]+)\s*<\/span>[\s\S]*?<span[^>]*class=["'][^"']*core-title[^"']*["'][^>]*>\s*([^<]+)\s*<\/span>/gmi;
           const dates: Array<{date: string, idx: number}> = [];
           let m: RegExpExecArray | null;
-          while ((m = dateRegex.exec(html)) !== null) {
-            dates.push({ date: m[1].trim(), idx: m.index });
-          }
+          while ((m = dateRegex.exec(html)) !== null) dates.push({ date: m[1].trim(), idx: m.index });
           const items: Array<{desc: string, amount: string, idx: number}> = [];
-          while ((m = itemRegex.exec(html)) !== null) {
-            items.push({ desc: m[1].trim(), amount: m[2].trim(), idx: m.index });
-          }
+          while ((m = itemRegex.exec(html)) !== null) items.push({ desc: m[1].trim(), amount: m[2].trim(), idx: m.index });
           for (const it of items) {
-            // find latest date before this item
             const d = dates.filter(dd => dd.idx < it.idx).pop();
             transactions.push({ date: d ? d.date : null, description: it.desc, amount: it.amount });
           }
@@ -436,6 +308,8 @@ export async function GetResult(cardNumber: string, pin: string, headless: boole
       
       const raw = attachBalances({ balance, cardNumber, expiryDate, purchases, transactions });
       return transformResult(raw);
+    } catch (err) {
+      throw new Error('Failed to extract gift card details: ' + String(err));
     }
   } finally {
     if (browser) {

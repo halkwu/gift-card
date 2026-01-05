@@ -78,7 +78,31 @@ export async function clickFirst(page: Page, selectors: string[]) {
   for (const sel of selectors) {
     const locator = await locateFirstInPageOrFrames(page, sel);
     if (locator) {
-      try { await locator.click({ force: true }); return true; } catch (e) {}
+      // Try a set of click strategies to handle flaky buttons
+      const strategies = [
+        async (loc: any) => { await loc.scrollIntoViewIfNeeded(); await loc.click({ force: true }); },
+        async (loc: any) => { await loc.evaluate((el: HTMLElement) => (el as HTMLElement).click()); },
+        async (loc: any) => { await loc.focus(); await page.keyboard.press('Enter'); },
+        async (loc: any) => { await loc.click(); },
+      ];
+      for (const strat of strategies) {
+        try {
+          await strat(locator);
+          return true;
+        } catch (e) {
+          // small delay before next strategy
+          try { await new Promise(r => setTimeout(r, 150)); } catch (ee) {}
+        }
+      }
+      // final fallback: try clicking via page-level querySelector
+      try {
+        const selText = selectors.join(', ');
+        await page.evaluate((s) => {
+          const el = document.querySelector(s) as HTMLElement | null;
+          if (el) el.click();
+        }, sel);
+        return true;
+      } catch (e) {}
     }
   }
   return false;
@@ -134,7 +158,6 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 
     // if (!context) {
     //   // try to find a local Chrome/Edge executable to make the browser more realistic
-    //   // Prefer local Chrome executable first, then Edge; allow override via env vars
     //   const possiblePaths = [
     //     process.env.CHROME_PATH,
     //     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -180,38 +203,38 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
     //   console.log('Using existing CDP-connected browser/context; skipping launch.');
     // }
 
-    // // stronger anti-detection init script
-    // await context.addInitScript(() => {
-    //   try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
-    //   try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch (e) {}
-    //   try { Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4] }); } catch (e) {}
-    //   try { // @ts-ignore
-    //     window.chrome = window.chrome || { runtime: {} };
-    //   } catch (e) {}
-    //   try {
-    //     // spoof some hardware properties
-    //     // @ts-ignore
-    //     Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-    //   } catch (e) {}
-    //   try {
-    //     // @ts-ignore
-    //     Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-    //   } catch (e) {}
-    //   try {
-    //     // permissions
-    //     const originalQuery = (navigator as any).permissions && (navigator as any).permissions.query;
-    //     if (originalQuery) {
-    //       // @ts-ignore
-    //       navigator.permissions.query = (params) => (
-    //         params && params.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(params)
-    //       );
-    //     }
-    //   } catch (e) {}
-    //   try {
-    //     // @ts-ignore
-    //     Object.defineProperty(navigator, 'connection', { get: () => ({ effectiveType: '4g', downlink: 10, rtt: 50 }) });
-    //   } catch (e) {}
-    // });
+    // stronger anti-detection init script
+    await context.addInitScript(() => {
+      try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
+      try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch (e) {}
+      try { Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4] }); } catch (e) {}
+      try { // @ts-ignore
+        window.chrome = window.chrome || { runtime: {} };
+      } catch (e) {}
+      try {
+        // spoof some hardware properties
+        // @ts-ignore
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+      } catch (e) {}
+      try {
+        // @ts-ignore
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+      } catch (e) {}
+      try {
+        // permissions
+        const originalQuery = (navigator as any).permissions && (navigator as any).permissions.query;
+        if (originalQuery) {
+          // @ts-ignore
+          navigator.permissions.query = (params) => (
+            params && params.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(params)
+          );
+        }
+      } catch (e) {}
+      try {
+        // @ts-ignore
+        Object.defineProperty(navigator, 'connection', { get: () => ({ effectiveType: '4g', downlink: 10, rtt: 50 }) });
+      } catch (e) {}
+    });
 
     
     page = await context.newPage();
@@ -402,12 +425,17 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
       if (page) {
         try { if (!page.isClosed()) await page.close(); } catch (e) {}
       }
-      try {
-        if (context) await context.close();
-      } catch (e) {}
-      try {
-        if (browser && browser.close) await browser.close();
-      } catch (e) {}
+    } catch (e) {}
+    try {
+      if (context) {
+        try { await context.close(); } catch (e) {}
+      }
+    } catch (e) {}
+
+    try {
+      if (browser) {
+        try { await browser.close(); } catch (e) {}
+      }
     } catch (e) {}
   }
 }
@@ -416,28 +444,23 @@ async function main() {
   const argv: string[] = process.argv.slice(2);
   if (argv.length < 2) {
     console.log('Usage: ts-node giftcard.ts <cardNumber> <pin> [--mode=headed]');
-    console.log('No action taken. Press Enter to exit.');
     await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
     return;
   }
   const card = argv[0];
   const pin = argv[1];
-  const modeArg = argv.find((a: string) => a.startsWith('--mode='));
-  const headless = modeArg ? modeArg.split('=')[1] === 'headless' : false;
-  // Note: --keep-open removed; script always closes browser when done
+  const headless = false;
 
   try {
     const details = await GetResult(card, pin, headless);
     if (!details) {
       console.error(JSON.stringify({ error: 'no details returned' }));
-      console.log('Press Enter to exit.');
       await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
       return;
     }
     console.log(JSON.stringify(details, null, 2));
   } catch (err) {
     console.error(JSON.stringify({ error: String(err) }));
-    console.log('Error occurred. Press Enter to exit.');
     await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
     return;
   }

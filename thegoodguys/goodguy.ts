@@ -261,7 +261,7 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 		const digits = (cardNumber || '').replace(/\D/g, '') || null;
 		return {
 			balance: balanceNum,
-			currency: balanceStr && /AUD/i.test(balanceStr) ? 'AUD' : (balanceStr && /\$/i.test(balanceStr) ? 'AUD' : 'AUD'),
+			currency: 'AUD',
 			cardNumber: digits,
 			expiryDate: null,
 			purchases: 0,
