@@ -1,109 +1,100 @@
 import { chromium } from 'playwright';
-import type { Page } from 'playwright';
+import type { Page, Locator } from 'playwright';
 import { launchChrome } from './launch_chrome';
 
-declare const process: any;
-declare const require: any;
-declare const module: any;
-
 async function findAndFill(page: Page, selectors: string[], value: string) {
-  async function tryFillWithStrategies(locator: any) {
+  async function Fill(locator: any) {
     const strategies = [
-      async (loc: any) => { await loc.fill(value); },
-      async (loc: any) => { await loc.click({ force: true }); await loc.fill(value); },
       async (loc: any) => { await loc.type(value, { delay: 20 }); },
-      async (loc: any) => {
-        await loc.evaluate((el: HTMLInputElement, v: string) => {
-          el.value = v;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }, value);
-      },
     ];
 
     for (const strat of strategies) {
       try {
         await strat(locator);
-        return true;
+        const actual = await locator.inputValue();
+        if (actual === value || actual.includes(value)) {
+          return true;
+        } 
+        console.warn(`value mismatch after fill. Expected "${value}", got "${actual}"`);
       } catch (err) {
-        // try next strategy
+        const msg = err && ((err as any).message || String(err)) || 'unknown error';
+        console.error(`Fill failed — ${msg}`);
       }
     }
     return false;
   }
 
-  async function locateFirstInPageOrFrames(root: any, sel: string) {
-    try {
-      const locator = root.locator(sel);
-      if ((await locator.count()) > 0) return locator.first();
-    } catch (e) {}
-    try {
-      const frames = await root.frames();
-      for (const frame of frames) {
-        try {
-          const locator = frame.locator(sel);
-          if ((await locator.count()) > 0) return locator.first();
-        } catch (ef) {}
-      }
-    } catch (e) {}
-    return null;
+  async function Find(
+    root: Page,
+    selector: string,
+    options?: {
+    timeout?: number;
   }
+): Promise<Locator | null> {
+  const timeout = options?.timeout ?? 1000;
+
+  try {
+    const locator = root.locator(selector).first();
+    await locator.waitFor({ state: 'visible', timeout });
+    return locator;
+  } catch {
+    console.error(`Not found in root for selector: ${selector}`);
+  }
+  return null;
+}
 
   for (const sel of selectors) {
-    const locator = await locateFirstInPageOrFrames(page, sel);
+    const locator = await Find(page, sel);
     if (locator) {
-      if (await tryFillWithStrategies(locator)) return true;
+      if (await Fill(locator)) return true;
     }
   }
   return false;
 }
 
-async function clickFirst(page: Page, selectors: string[]) {
-  async function locateFirstInPageOrFrames(root: any, sel: string) {
+async function clickFirst(
+  page: Page,
+  selectors: string[],
+  options?: { timeout?: number; waitAfterClick?: boolean }
+): Promise<boolean> {
+  const timeout = options?.timeout ?? 2000;
+  const waitAfterClick = options?.waitAfterClick ?? true;
+
+  async function locateFirst(root: Page, selector: string): Promise<Locator | null> {
     try {
-      const locator = root.locator(sel);
-      if ((await locator.count()) > 0) return locator.first();
-    } catch (e) {}
-    try {
-      const frames = await root.frames();
-      for (const frame of frames) {
-        try {
-          const locator = frame.locator(sel);
-          if ((await locator.count()) > 0) return locator.first();
-        } catch (ef) {}
-      }
-    } catch (e) {}
+      const locator = root.locator(selector).first();
+      await locator.waitFor({ state: 'visible', timeout });
+      return locator;
+    } catch {
+      console.error(`locateFirst: not found in root for selector: ${selector}`);
+    }
     return null;
   }
 
   for (const sel of selectors) {
-    const locator = await locateFirstInPageOrFrames(page, sel);
-    if (locator) {
-      // Try a set of click strategies to handle flaky buttons
-      const strategies = [
-        async (loc: any) => { await loc.scrollIntoViewIfNeeded(); await loc.click({ force: true }); },
-        async (loc: any) => { await loc.evaluate((el: HTMLElement) => (el as HTMLElement).click()); },
-        async (loc: any) => { await loc.focus(); await page.keyboard.press('Enter'); },
-        async (loc: any) => { await loc.click(); },
-      ];
-      for (const strat of strategies) {
+    const locator = await locateFirst(page, sel);
+    if (!locator) {
+      console.warn(`clickFirst: selector not found - ${sel}`);
+      continue;
+    }
+
+    try {
+      await locator.scrollIntoViewIfNeeded();
+      await locator.click({ timeout });
+
+      if (waitAfterClick) {
         try {
-          await strat(locator);
-          return true;
-        } catch (e) {
-          // small delay before next strategy
-          try { await new Promise(r => setTimeout(r, 150)); } catch (ee) {}
+          await Promise.race([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 2000 }),
+            locator.waitFor({ state: 'detached', timeout: 2000 }),
+          ]);
+        } catch {
+          console.warn(`clickFirst: no navigation or detachment after clicking "${sel}"`);
         }
       }
-      // final fallback: try clicking via page-level querySelector
-      try {
-        const selText = selectors.join(', ');
-        await page.evaluate((s) => {
-          const el = document.querySelector(s) as HTMLElement | null;
-          if (el) el.click();
-        }, sel);
-        return true;
-      } catch (e) {}
+      return true;
+    } catch (err) {
+      console.error(`clickFirst: failed to click selector "${sel}" — ${(err as Error).message}`);
     }
   }
   return false;
@@ -111,12 +102,10 @@ async function clickFirst(page: Page, selectors: string[]) {
 
 function parseNumFromString(s: string | null) {
       if (!s) return null;
-      try {
-        const cleaned = s.replace(/[^0-9.\-]/g, '').replace(/,/g, '');
-        const n = parseFloat(cleaned);
-        return Number.isNaN(n) ? null : n;
-      } catch (e) { return null; }
-    }
+      const cleaned = s.replace(/[^0-9.\-]/g, '').replace(/,/g, '');
+      const n = parseFloat(cleaned);
+      return Number.isNaN(n) ? null : n;
+} 
 
 async function cleanedCellText(locator: any) {
   try {
@@ -129,24 +118,49 @@ async function cleanedCellText(locator: any) {
   } catch (e) { return null; }
 }
 
-// balance and expiry extraction will be performed directly from the page table
-export async function GetResult(cardNumber: string, pin: string, headless = false) {
-  const url = 'https://www.giftcards.com.au/CheckBalance';
+interface Transaction {
+  date: string | null;
+  description: string | null;
+  amount: number | null;
+  balance: number | null;
+  currency: string;
+}
+
+interface GiftCardResult {
+  balance: number | null;
+  currency: string;
+  cardNumber: string | null;
+  expiryDate: string | null;
+  purchases: number;
+  transactions: Transaction[];
+}
+
+const SELECTORS = {
+  card: ['#cardNumber', 'input[name*=card]', 'input[placeholder*=Card]'],
+  pin: ['#cardPIN', '#pin', 'input[name*=pin]', 'input[placeholder*=PIN]'],
+  submit: ['button[type=submit]', 'input[type=submit]', 'button:has-text("Check balance")']
+};
+
+const RECAPTCHA_IFRAME = 'iframe[title="reCAPTCHA"]';
+
+const SUBMIT_SELECTORS = [
+  'button[type=submit]',
+  'input[type=submit]',
+  'button:has-text("Check balance")',
+  'button',
+];
+
+async function launchBrowser(headless: boolean): Promise<{ browser: any, context: any, launchedPid: number | null }> {
   let browser: any = null;
   let context: any = null;
-  let page: any = null;
-  let connectedOverCDP = false;
   let launchedPid: number | null = null;
-  try {
-    // If not running in headless mode, try to launch a local Chrome with remote-debugging enabled
     if (!headless) {
       try {
-        const exePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-        const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile';
+        const exePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'; // adjust as needed
+        const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile'; // adjust as needed
         try {
           launchedPid = launchChrome(exePath, userDataDir, 9222);
           if (launchedPid) console.log(`Launched Chrome (pid=${launchedPid}), waiting for CDP...`);
-          else console.log('launchChrome returned no pid; attempting to connect to CDP.');
         } catch (e) {
           console.error('Error invoking launchChrome:', e);
         }
@@ -159,203 +173,180 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
       while (Date.now() - start < timeout) {
         try {
           browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
-          connectedOverCDP = true;
           break;
         } catch (e) {
           await new Promise(r => setTimeout(r, 500));
         }
       }
     }
+
     const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
     context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
     console.log('Connected to existing browser via CDP (http)');
+    return { browser, context, launchedPid };
+}
 
-    page = await context.newPage();
-    let gotoResponse: any = null;
-    try {
-      try {
-        gotoResponse = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      } catch (e) {
-        console.error('Navigation error (goto):', e && (e as Error).message || e);
+async function fillInputs(page: Page, cardNumber: string, pin: string): Promise<boolean> {
+  const filledCard = await findAndFill(page, SELECTORS.card, cardNumber);
+  const filledPin = await findAndFill(page, SELECTORS.pin, pin);
+  return !!filledCard && !!filledPin;
+}
+
+async function highlightRecaptcha(page: Page): Promise<void> {
+  try {
+    await page.evaluate(() => {
+      if (!document.getElementById('__gc_recaptcha_highlight')) {
+        const style = document.createElement('style');
+        style.id = '__gc_recaptcha_highlight';
+        style.textContent = `
+          .__gc_recaptcha_highlight { position: relative !important; box-shadow: 0 0 0 4px rgba(255,165,0,0.95) !important; outline: 4px solid rgba(255,165,0,0.9) !important; z-index: 9999999 !important; transition: box-shadow 0.3s ease; }
+          .__gc_recaptcha_pulse { animation: __gc_pulse 1.5s infinite; }
+          @keyframes __gc_pulse { 0% { box-shadow: 0 0 0 0 rgba(255,165,0,0.9); } 70% { box-shadow: 0 0 0 8px rgba(255,165,0,0); } 100% { box-shadow: 0 0 0 0 rgba(255,165,0,0); } }
+          .__gc_recaptcha_label { position: absolute; top: -28px; left: 0; background: rgba(255,165,0,0.95); color: #000; padding: 4px 8px; font-weight: 600; border-radius: 4px; z-index: 10000000; font-family: sans-serif; font-size: 12px; }
+        `;
+        document.head.appendChild(style);
       }
-      // navigation completed; no debug artifacts will be written
-    } catch (e) {
-      console.error('Navigation error:', e && (e as Error).message || e);
-      return null;
-    }
 
-    const cardSelectors = ['#cardNumber', 'input[name*=card]', 'input[placeholder*=Card]', 'input[placeholder*=card]'];
-    const pinSelectors = ['#cardPIN', '#pin', 'input[name*=pin]', 'input[placeholder*=PIN]', 'input[placeholder*=Pin]'];
+      const nodes = Array.from(document.querySelectorAll('iframe[title="reCAPTCHA"]')) as HTMLElement[];
+      nodes.forEach((el) => {
+        el.classList.add('__gc_recaptcha_highlight', '__gc_recaptcha_pulse');
+        if (!el.querySelector('.__gc_recaptcha_label')) {
+          const label = document.createElement('div');
+          label.className = '__gc_recaptcha_label';
+          label.textContent = 'reCAPTCHA — please solve manually';
+          const cs = getComputedStyle(el);
+          if (cs.position === 'static' || !cs.position) el.style.position = 'relative';
+          el.appendChild(label);
+        }
+        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+      });
+    });
+  } catch (e) {
+    console.warn('highlightRecaptcha error:', e);
+  }
+}
 
-    try {
-      const filledCard = await findAndFill(page, cardSelectors, cardNumber);
-      const filledPin = await findAndFill(page, pinSelectors, pin);
-      if (!filledCard || !filledPin) {
-        console.warn('Could not find card or PIN inputs.');
-        return null;
-      }
-    } catch (e) {
-      console.error('Error filling inputs:', e && (e as Error).message || e);
-      return null;
-    }
+async function solveRecaptchaAndSubmit(page: Page): Promise<void> {
+  try {
+    const hasRecaptcha = await page.$(RECAPTCHA_IFRAME);
 
-    // If page has a reCAPTCHA, prompt the user to solve it manually in the opened browser.
-    try {
-      const hasRecaptcha = await page.$('.g-recaptcha, iframe[src*="recaptcha"]');
-      if (hasRecaptcha) {
-        console.log('Detected reCAPTCHA. Please complete it in the opened browser window.');
-        await page.bringToFront();
+    if (hasRecaptcha) {
+      console.log('Detected reCAPTCHA on page. Please solve it manually in the browser.');
+      await page.bringToFront();
+      await highlightRecaptcha(page);
+      const timeout = 30 * 1000; 
 
-        // inject visual highlight and label for reCAPTCHA elements to help manual solving
+      const interval = 1000;
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        const ready = await page.$('table.gift-card-summary__tableContent, #transaction-history, .card-balance, .balance, .balance-amount');
+        if (ready) 
+          break;
         try {
-          await page.evaluate(() => {
-            try {
-              if (!document.getElementById('__gc_recaptcha_highlight')) {
-                const style = document.createElement('style');
-                style.id = '__gc_recaptcha_highlight';
-                style.textContent = '\n.__gc_recaptcha_highlight { position: relative !important; box-shadow: 0 0 0 4px rgba(255,165,0,0.95) !important; outline: 4px solid rgba(255,165,0,0.9) !important; z-index: 9999999 !important; transition: box-shadow 0.3s ease; }\n.__gc_recaptcha_pulse { animation: __gc_pulse 1.5s infinite; }\n@keyframes __gc_pulse { 0% { box-shadow: 0 0 0 0 rgba(255,165,0,0.9); } 70% { box-shadow: 0 0 0 8px rgba(255,165,0,0); } 100% { box-shadow: 0 0 0 0 rgba(255,165,0,0); } }\n.__gc_recaptcha_label { position: absolute; top: -28px; left: 0; background: rgba(255,165,0,0.95); color: #000; padding: 4px 8px; font-weight: 600; border-radius: 4px; z-index: 10000000; font-family: sans-serif; font-size: 12px; }\n';
-                document.head.appendChild(style);
-              }
-            } catch (e) {}
-            const nodes = Array.from(document.querySelectorAll('.g-recaptcha, iframe[src*="recaptcha"]'));
-            nodes.forEach((el, idx) => {
-              try {
-                const he = el as HTMLElement;
-                he.classList.add('__gc_recaptcha_highlight', '__gc_recaptcha_pulse');
-                try {
-                  if (!he.querySelector('.__gc_recaptcha_label')) {
-                    const label = document.createElement('div');
-                    label.className = '__gc_recaptcha_label';
-                    label.textContent = 'reCAPTCHA — please solve';
-                    // ensure the container can position the label
-                    const cs = getComputedStyle(he);
-                    if (cs.position === 'static' || !cs.position) he.style.position = 'relative';
-                    he.appendChild(label);
-                  }
-                } catch (e) {}
-                try { he.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' }); } catch (e) {}
-              } catch (e) {}
-            });
+          const solved = await page.evaluate(() => {
+            const ta = document.getElementById('g-recaptcha-response') as HTMLTextAreaElement | null;
+            const token = ta?.value && ta.value.length > 20 ? ta.value : (window as any).grecaptcha?.getResponse?.();
+            return !!token;
           });
-        } catch (e) {}
-
-        const solvedToken = await (async () => {
-          const timeout = 5 * 60 * 1000; // 5 minutes
-          const interval = 1000;
-          const start = Date.now();
-          while (Date.now() - start < timeout) {
-            try {
-              const token = await page.evaluate(() => {
-                const ta = document.getElementById('g-recaptcha-response') as HTMLTextAreaElement | null;
-                if (ta && ta.value && ta.value.length > 20) return ta.value;
-                try {
-                  // @ts-ignore
-                  if ((window as any).grecaptcha && typeof (window as any).grecaptcha.getResponse === 'function') {
-                    const r = (window as any).grecaptcha.getResponse();
-                    if (r && r.length > 20) return r;
-                  }
-                } catch (e) {}
-                return null;
-              });
-              if (token) return token;
-            } catch (e) {}
-            await new Promise(r => setTimeout(r, interval));
-          }
-          return null;
-        })();
-
-        if (!solvedToken) console.log('Timeout waiting for reCAPTCHA; will submit the form anyway.');
-        else 
-          console.log('reCAPTCHA solved; submitting form...');
-          await clickFirst(page, ['button[type=submit]', 'input[type=submit]', 'button:has-text("Check balance")', 'button']);
+          if (solved) break;
+        } catch {
+          console.warn('Error checking reCAPTCHA solved status');
+        }
+        await new Promise(r => setTimeout(r, interval));
       }
-    } catch (e) {
-      console.error('Error handling reCAPTCHA detection:', e && (e as Error).message || e);
     }
+    await clickFirst(page, SUBMIT_SELECTORS);
+  } catch (e) {
+    console.error('Error in solveRecaptchaAndSubmit:', e);
+  }
+}
 
-    try {
-      await Promise.race([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 3000 }),
-        page.waitForSelector('.card-balance, .balance, .balance-amount', { timeout: 3000 }).catch(() => null),
-      ]);
-    } catch (e) {
-    }
+async function extractBalance(page: Page): Promise<{ balance: number | null, expiryDate: string | null }> {
+  try {
+    const table = page.locator('table.gift-card-summary__tableContent');
+    if ((await table.count()) === 0) return { balance: null, expiryDate: null };
 
-    // try to extract balance and expiry date from the gift card summary table
-    let balanceNum: number | null = null;
-    let balanceStr: string | null = null;
-    let expiryDateStr: string | null = null;
-    try {
-      const table = page.locator('table.gift-card-summary__tableContent');
-      if ((await table.count()) > 0) {
-        const balanceCell = table.locator('tr:has(th:has-text("Balance:")) td').first();
-        const expiryCell = table.locator('tr:has(th:has-text("Expiry Date:")) td').first();
-        try { balanceStr = (await balanceCell.textContent())?.trim() || null; } catch (e) { balanceStr = null; }
-        try { expiryDateStr = (await expiryCell.textContent())?.trim() || null; } catch (e) { expiryDateStr = null; }
-      }
-    } catch (e) {
-      balanceStr = null; expiryDateStr = null;
-    }
+    const balanceCell = table.locator('tr:has(th:has-text("Balance:")) td').first();
+    const expiryCell = table.locator('tr:has(th:has-text("Expiry Date:")) td').first();
 
-    if (balanceStr) {
-      try {
-        const cleaned = balanceStr.replace(/[^0-9.\-]/g, '').replace(/,/g, '');
-        const n = parseFloat(cleaned);
-        balanceNum = Number.isNaN(n) ? null : n;
-      } catch (e) { balanceNum = null; }
-    }
+    const balanceText = (await balanceCell.textContent())?.trim() || null;
+    const expiryText = (await expiryCell.textContent())?.trim() || null;
 
-    // parse transaction history table into transactions array
-    let transactions: Array<any> = [];
-    try {
-      const rows = page.locator('#transaction-history tbody tr');
-      const rowCount = await rows.count();
-      for (let i = 0; i < rowCount; i++) {
-        try {
-          const row = rows.nth(i);
-          const dateText = await cleanedCellText(row.locator('td').nth(0));
-          const descText = await cleanedCellText(row.locator('td').nth(1));
-          // convert dateText (dd/mm/yyyy) to ISO string
-          let dateIso: string | null = null;
-          if (dateText) {
-            const m = dateText.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-            if (m) {
-              const d = Number(m[1]);
-              const mo = Number(m[2]);
-              const y = Number(m[3]);
-              const dt = new Date(y, mo - 1, d);
-              if (!Number.isNaN(dt.getTime())) dateIso = dt.toISOString();
-            } else {
-              const parsed = Date.parse(dateText);
-              if (!Number.isNaN(parsed)) dateIso = new Date(parsed).toISOString();
-            }
-          }
-          const amountText = (await row.locator('td').nth(3).textContent())?.trim() || null;
-          const balText = (await row.locator('td').nth(4).textContent())?.trim() || null;
-          const amountNum = parseNumFromString(amountText);
-          const balNum = parseNumFromString(balText);
-          transactions.push({
-            date: dateIso || dateText,
-            description: descText,
-            amount: amountNum,
-            balance: balNum,
-            currency: 'AUD'
-          });
-        } catch (e) {}
-      }
-    } catch (e) {
-      transactions = [];
-    }
+    const balance = balanceText ? parseNumFromString(balanceText) : null;
+    return { balance, expiryDate: expiryText };
+  } catch (e) {
+    console.error('extractBalance error:', e);
+    return { balance: null, expiryDate: null };
+  }
+}
 
-    const digits = (cardNumber || '').replace(/\D/g, '') || null;
-    return {
-      balance: balanceNum,
+async function extractTransactions(page: Page): Promise<Transaction[]> {
+  const rows = page.locator('#transaction-history tbody tr');
+  const count = await rows.count();
+  if (!count) return [];
+
+  const headerCells = await page.$$eval('#transaction-history thead th', ths => ths.map(th => th.textContent?.trim() || ''));
+  const colMap = {
+    date: headerCells.indexOf('Date'),
+    description: headerCells.indexOf('Description'),
+    amount: headerCells.indexOf('Amount'),
+    balance: headerCells.indexOf('Balance')
+  };
+
+  const transactions: Transaction[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const row = rows.nth(i);
+    const dateText = await cleanedCellText(row.locator('td').nth(colMap.date));
+    const descText = await cleanedCellText(row.locator('td').nth(colMap.description));
+    const amountText = await cleanedCellText(row.locator('td').nth(colMap.amount));
+    const balanceText = await cleanedCellText(row.locator('td').nth(colMap.balance));
+
+    transactions.push({
+      date: dateText,
+      description: descText,
+      amount: parseNumFromString(amountText),
+      balance: parseNumFromString(balanceText),
+      currency: 'AUD'
+    });
+  }
+
+  return transactions;
+}
+
+export async function GetResult(cardNumber: string, pin: string, headless = false) {
+  const url = 'https://www.giftcards.com.au/CheckBalance';
+  let browser: any = null;
+  let launchedPid: number | null = null;
+  let connectedOverCDP = false;
+  try {
+    const { browser: b, context, launchedPid: pid } = await launchBrowser(headless);
+    browser = b;
+    launchedPid = pid;
+    connectedOverCDP = true;
+    const page = await context.newPage();
+
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const filled = await fillInputs(page, cardNumber, pin);
+    if (!filled) return null;
+
+    await solveRecaptchaAndSubmit(page);
+
+    await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 2000 });
+
+    const { balance, expiryDate } = await extractBalance(page);
+    const transactions = await extractTransactions(page);
+    const result: GiftCardResult = {
+      balance,
       currency: 'AUD',
-      cardNumber: digits,
-      expiryDate: expiryDateStr,
+      cardNumber: cardNumber.replace(/\D/g, '') || null,
+      expiryDate,
       purchases: transactions.length,
-      transactions: transactions
+      transactions
     };
+    return result;
+  } catch (e) {
+    console.error('The Gift Card number or PIN is incorrect.', e);
   } finally {
     try {
       if (browser) {
@@ -364,14 +355,14 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
               await (browser as any).disconnect(); 
             }
             if (launchedPid) {
-              try {
                 const cp = require('child_process');
                 cp.execSync(`taskkill /PID ${launchedPid} /T /F`);
-              } catch (e) {}
             }
           }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('Error during browser cleanup:', e);
+    }
   }
 }
 
@@ -390,13 +381,13 @@ async function main() {
     const details = await GetResult(card, pin, headless);
     if (!details) {
       console.error(JSON.stringify({ error: 'no details returned' }));
-      await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
+      process.exitCode = 1;
       return;
     }
     console.log(JSON.stringify(details, null, 2));
   } catch (err) {
     console.error(JSON.stringify({ error: String(err) }));
-    await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
+    process.exitCode = 1;
     return;
   }
 }
