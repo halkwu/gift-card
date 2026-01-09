@@ -107,6 +107,32 @@ function parseNumFromString(s: string | null) {
       return Number.isNaN(n) ? null : n;
 } 
 
+function parseDateToIso(s: string | null): string | null {
+  if (!s) return null;
+  const txt = s.trim().replace(/\s+/g, ' ');
+  const direct = new Date(txt);
+  if (!isNaN(direct.getTime())) return direct.toISOString();
+
+  const m = txt.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    let day = parseInt(m[1], 10);
+    let month = parseInt(m[2], 10);
+    let year = parseInt(m[3], 10);
+    if (year < 100) year += year >= 70 ? 1900 : 2000;
+    const hour = m[4] ? parseInt(m[4], 10) : 0;
+    const minute = m[5] ? parseInt(m[5], 10) : 0;
+    const second = m[6] ? parseInt(m[6], 10) : 0;
+    const utc = Date.UTC(year, month - 1, day, hour, minute, second);
+    return new Date(utc).toISOString();
+  }
+
+  const alt = txt.replace(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})/, '$1/$2/$3');
+  const d2 = new Date(alt);
+  if (!isNaN(d2.getTime())) return d2.toISOString();
+
+  return null;
+}
+
 async function cleanedCellText(locator: any) {
   try {
     return await locator.evaluate((el: HTMLElement) => {
@@ -303,7 +329,7 @@ async function extractTransactions(page: Page): Promise<Transaction[]> {
     const balanceText = await cleanedCellText(row.locator('td').nth(colMap.balance));
 
     transactions.push({
-      date: dateText,
+      date: parseDateToIso(dateText),
       description: descText,
       amount: parseNumFromString(amountText),
       balance: parseNumFromString(balanceText),

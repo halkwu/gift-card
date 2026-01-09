@@ -187,7 +187,7 @@ function transformResult(obj: any): GiftCardResult | null {
   })) : [];
 
   let cardStr: string | null = null;
-  try { cardStr = String(obj.cardNumber || '').replace(/\D/g, '') || null; } catch { cardStr = null; }
+  try { cardStr = obj.cardNumber != null ? String(obj.cardNumber) : null; } catch { cardStr = null; }
 
   const purchasesCount = Array.isArray(txs) ? txs.length : (typeof obj.purchases === 'number' ? Math.floor(obj.purchases) : null);
   const expiry = obj.expiryDate ? parseDateToIso(obj.expiryDate) : null;
@@ -281,10 +281,12 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 
     await clickFirst(page, SELECTORS.submit);
     // Wait for result page; throw if not reached within timeout
-    await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 2000 });
+    await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 10000 });
 
     const raw = await extractRawFromPage(page);
     const rawWithBalances = attachBalances(raw);
+    // ensure returned cardNumber is the original client input
+    try { rawWithBalances.cardNumber = cardNumber; } catch {}
     return transformResult(rawWithBalances);
   } catch (e) {
     console.error('The Gift Card number or Access Code is incorrect.', e);

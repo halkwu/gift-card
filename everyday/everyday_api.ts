@@ -1,33 +1,137 @@
-import { ApolloServer } from 'apollo-server';
+import { ApolloServer} from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { GraphQLScalarType, Kind } from 'graphql';
 import { GetResult } from './everyday';
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
+const JSONScalar = new GraphQLScalarType({
+  name: 'JSON',
+  description: 'Arbitrary JSON value',
+  parseValue: (value) => value,
+  serialize: (value) => value,
+  parseLiteral: (ast) => {
+    switch (ast.kind) {
+      case Kind.STRING:
+      case Kind.BOOLEAN:
+        return ast.value;
+      case Kind.INT:
+      case Kind.FLOAT:
+        return Number(ast.value);
+      case Kind.OBJECT: {
+        const value: any = Object.create(null);
+        ast.fields.forEach((field: any) => {
+          value[field.name.value] = parseLiteral(field.value);
+        });
+        return value;
+      }
+      case Kind.LIST:
+        return ast.values.map(parseLiteral);
+      default:
+        return null;
+    }
+  }
+});
+
+const DateScalar = new GraphQLScalarType({
+  name: 'Date',
+  description: 'ISO-8601 date string',
+  serialize: (value: any) => {
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value === 'string') return value;
+    return null;
+  },
+  parseValue: (value: any) => {
+    return value ? new Date(value) : null;
+  },
+  parseLiteral: (ast: any) => {
+    if (ast.kind === Kind.STRING) return new Date(ast.value);
+    return null;
+  }
+});
+
+function parseLiteral(ast: any): any {
+  switch (ast.kind) {
+    case Kind.STRING:
+    case Kind.BOOLEAN:
+      return ast.value;
+    case Kind.INT:
+    case Kind.FLOAT:
+      return Number(ast.value);
+    case Kind.OBJECT: {
+      const value: any = Object.create(null);
+      ast.fields.forEach((field: any) => {
+        value[field.name.value] = parseLiteral(field.value);
+      });
+      return value;
+    }
+    case Kind.LIST:
+      return ast.values.map(parseLiteral);
+    default:
+      return null;
+  }
+}
+
 const resolvers = {
+  Date: DateScalar,
+  JSON: JSONScalar,
   Query: {
-    checkGiftCard: async (_: any, args: { cardNumber: string; pin: string; headless?: boolean }) => {
-      const { cardNumber, pin, headless = false } = args;
+    Account: async (_: any, { id, pin, headless }: { id: string, pin: string, headless?: boolean }, context: any) => {
+      const useHeadless = typeof headless === 'boolean' ? headless : true;
+      const key = `${id}:${pin}:${useHeadless}`;
       try {
-        const res = await GetResult(cardNumber, pin, headless);
-        return res;
-      } catch (err) {
-        throw new Error(String(err));
+        if (!context.fetchCache) context.fetchCache = new Map();
+        if (!context.fetchCache.has(key)) {
+          context.fetchCache.set(key, GetResult(id, pin || '', useHeadless));
+        }
+        const details: any = await context.fetchCache.get(key);
+        if (!details) return null;
+        return {
+          id: details.cardNumber || id,
+          name: 'Everyday Gift Card',
+          balance: details.balance,
+          currency: details.currency || 'AUD'
+        };
+      } catch (err: any) {
+        const msg = err && err.message ? err.message : 'Failed to fetch account';
+        throw new Error(msg);
       }
     },
-  },
+    Transaction: async (_: any, { id, pin, headless }: { id: string, pin: string, headless?: boolean }, context: any) => {
+      const useHeadless = typeof headless === 'boolean' ? headless : true;
+      const key = `${id}:${pin}:${useHeadless}`;
+      try {
+        if (!context.fetchCache) context.fetchCache = new Map();
+        if (!context.fetchCache.has(key)) {
+          context.fetchCache.set(key, GetResult(id, pin || '', useHeadless));
+        }
+        const details: any = await context.fetchCache.get(key);
+        if (!details || !Array.isArray(details.transactions)) return [];
+        return details.transactions.map((t: any, idx: number) => ({
+          transactionId: `${id}-${idx+1}`,
+          transactionTime: t.date,
+          amount: t.amount,
+          currency: t.currency || details.currency || 'AUD',
+          description: t.description,
+          status: 'confirmed',
+          balance: t.balance,
+        }));
+      } catch (err: any) {
+        const msg = err && err.message ? err.message : 'Failed to fetch transactions';
+        throw new Error(msg);
+      }
+    }
+  }
 };
 
 async function start() {
   const server = new ApolloServer({ typeDefs, resolvers });
   const { url } = await server.listen({ port: 4000 });
-  // eslint-disable-next-line no-console
   console.log(`GraphQL server running at ${url}`);
 }
 
-start().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('Failed to start GraphQL server:', err);
+start().catch((e) => {
+  console.error('Failed to start GraphQL server', e);
   process.exit(1);
 });

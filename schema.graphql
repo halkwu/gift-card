@@ -1,23 +1,34 @@
+"""
+Custom scalar for date representation
+"""
 scalar Date
 
-type Transaction {
-	date: Date
-	description: String
-	amount: Float
-	balance: Float
-	currency: String
+"""
+Arbitrary JSON passthrough scalar used by resolvers
+"""
+scalar JSON
+
+type transaction {
+  transactionId: ID
+  transactionTime: Date
+  amount: Float
+  currency: String
+  description: String
+  status: String
+  balance: Float
 }
 
-type GiftCardResult {
-	balance: Float
-	currency: String
-	cardNumber: String
-	expiryDate: String
-	purchases: Int
-	transactions: [Transaction]
+"""
+Wrapper for transactions list returned 
+"""
+type account {
+  id: String
+  name: String
+  balance: Float
+  currency: String
 }
 
 type Query {
-	checkGiftCard(cardNumber: String!, pin: String!, headless: Boolean = false): GiftCardResult
+  Account(id: String!, pin: String!, headless: Boolean = true): account
+  Transaction(id: String!, pin: String!, headless: Boolean = true): [transaction]
 }
-
