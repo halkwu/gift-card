@@ -8,18 +8,46 @@
 cd everyday
 npm install
 ```
-- **Common scripts (run in the `everyday` directory):**
-	- `npm run everyday` — runs `ts-node everyday.ts`
-	- `npm run start:graphql` — runs `ts-node everyday_api.ts` (starts a GraphQL server for queries/debugging)
 
 ```bash
 # Example: start the GraphQL server
 cd everyday
-npm run start:graphql
+npx ts-node everyday_api.ts
+```
+
+**Example GraphQL query**
+The GraphQL server started by `graphql-server.ts` typically exposes an endpoint such as `http://localhost:4000/graphql` (see `everyday/everyday_api.ts` to confirm the port). 
+Example graphql request:
+
+```graphql
+query GetBalanceAndTxs($id: String!, $pin: String!, $headless: Boolean) {
+  Account(id: $id, pin: $pin, headless: $headless) {
+    id
+    name
+    balance
+    currency
+  }
+  Transaction(id: $id, pin: $pin, headless: $headless) {
+      transactionId
+      transactionTime
+      amount
+      currency
+			description
+      status
+      balance
+    }
+  }
+
+query variable
+{
+	"id": "6280005616388591380",
+	"pin": "8937",
+	"headless": false
+}
+
 ```
 
 (# giftcard Usage for reCAPTCHA)
-
 ```bash
 cd giftcard
 npm install
@@ -36,24 +64,35 @@ npx ts-node giftcard_api.ts
 ```
 
 **Example GraphQL query**
-The GraphQL server started by `graphql-server.ts` typically exposes an endpoint such as `http://localhost:4000/graphql` (see `everyday/everyday_api.ts` to confirm the port). 
+The GraphQL server started by `graphql-server.ts` typically exposes an endpoint such as `http://localhost:4000/graphql` (see `giftcard/giftcard_api.ts` to confirm the port). 
 Example graphql request:
 
 ```graphql
-query {
-  checkEveryday(cardNumber:"6280005616388591380", pin:"8937", headless:true) {
+query GetBalanceAndTxs($id: String!, $pin: String!, $headless: Boolean) {
+  Account(id: $id, pin: $pin, headless: $headless) {
+    id
+    name
     balance
-    cardNumber
-    expiryDate
-    purchases
-    transactions {
-      date
-      description
+    currency
+  }
+  Transaction(id: $id, pin: $pin, headless: $headless) {
+      transactionId
+      transactionTime
       amount
+      currency
+			description
+      status
       balance
     }
   }
+
+query variable
+{
+	"id": "62734010275110916",
+	"pin": "2170",
+	"headless": false
 }
+
 ```
 
 **Files to check**
