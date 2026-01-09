@@ -29,6 +29,6 @@ type account {
 }
 
 type Query {
-  Account(id: String!, pin: String!, headless: Boolean = true): account
-  Transaction(id: String!, pin: String!, headless: Boolean = true): [transaction]
+  Account(id: String, pin: String, headless: Boolean = true): account
+  Transaction(id: String, pin: String, headless: Boolean = true): [transaction]
 }
