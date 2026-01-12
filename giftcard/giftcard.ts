@@ -145,7 +145,11 @@ async function cleanedCellText(locator: any) {
 }
 
 interface Transaction {
+  // Original parsed ISO date (kept for compatibility)
   date: string | null;
+  // Optional fields aligned with GraphQL `transaction` schema
+  transactionId?: string | null;
+  transactionTime?: string | null;
   description: string | null;
   amount: number | null;
   balance: number | null;

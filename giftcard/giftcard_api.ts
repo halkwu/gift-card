@@ -86,13 +86,13 @@ const resolvers = {
           context.fetchCache.set(key, GetResult(id, pin || '', useHeadless));
         }
         const details: any = await context.fetchCache.get(key);
-        if (!details) return null;
-        return {
+        if (!details) return [];
+        return [{
           id: details.cardNumber || id,
           name: 'Everyday Gift Card',
           balance: details.balance,
           currency: details.currency || 'AUD'
-        };
+        }];
       } catch (err: any) {
         const msg = err && err.message ? err.message : 'Failed to fetch account';
         throw new Error(msg);

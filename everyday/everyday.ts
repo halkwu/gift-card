@@ -295,6 +295,29 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
   }
 }
 
+export function AccountFromDetails(details: any, id?: string) {
+  if (!details) return null;
+  return {
+    id: details.cardNumber || id,
+    name: 'Everyday Gift Card',
+    balance: details.balance,
+    currency: details.currency || 'AUD'
+  };
+}
+
+export function TransactionsFromDetails(details: any, id?: string) {
+  if (!details || !Array.isArray(details.transactions)) return [];
+  return details.transactions.map((t: any, idx: number) => ({
+    transactionId: `${id}-${idx + 1}`,
+    transactionTime: t.date,
+    amount: t.amount,
+    currency: t.currency || details.currency || 'AUD',
+    description: t.description,
+    status: 'confirmed',
+    balance: t.balance
+  }));
+}
+
 async function main() {
   const argv: string[] = process.argv.slice(2);
   if (argv.length < 2) {
