@@ -123,8 +123,9 @@ const resolvers = {
         const details: any = await fetchDataFromSession(session);
         if (!details || !Array.isArray(details.transactions)) return [];
 
-        // Attempt to use a human-friendly id prefix when available
-        const prefix = (identifier && identifier.includes(':')) ? identifier.split(':')[0] : identifier || '';
+        // Prefer the card number from details as a human-friendly id prefix when available,
+        // otherwise fall back to legacy or random identifier behavior
+        const prefix = (details && details.cardNumber) ? details.cardNumber : ((identifier && identifier.includes(':')) ? identifier.split(':')[0] : identifier || '');
 
         // close browser and clear cache after successful fetch
         try { await closeSession(session); } catch (_) {}
