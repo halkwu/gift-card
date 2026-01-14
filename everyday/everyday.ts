@@ -2,7 +2,9 @@ import { firefox } from 'playwright';
 import type { Page, Locator, Browser } from 'playwright';
 
 interface Transaction {
-  date: string | null;
+  // raw extraction may use `date`; normalized output uses `transactionTime`
+  transactionTime?: string | null;
+  date?: string | null;
   description: string | null;
   amount: number | null;
   balance: number | null;
@@ -179,7 +181,7 @@ function transformResult(obj: any): GiftCardResult | null {
   if (!obj) return null;
   const balNum = parseNumFromString(obj.balance || null);
   const txs = Array.isArray(obj.transactions) ? obj.transactions.map((t: any) => ({
-    date: t && t.date ? parseDateToIso(String(t.date)) : null,
+    transactionTime: t && (t.transactionTime || t.date) ? parseDateToIso(String(t.transactionTime || t.date)) : null,
     description: t && t.description ? String(t.description) : null,
     amount: t && t.amount ? parseNumFromString(String(t.amount)) : null,
     balance: t && t.balance ? parseNumFromString(String(t.balance)) : null,
@@ -266,7 +268,27 @@ async function extractRawFromPage(page: Page): Promise<any> {
   return { balance, cardNumber: cardNum, expiryDate, purchases, transactions };
 }
 
-export async function GetResult(cardNumber: string, pin: string, headless = false) {
+// export async function GetResult(cardNumber: string, pin: string, headless = false) {
+//   const url = 'https://www.everyday.com.au/gift-cards/check-balance';
+//   let browser: Browser | null = null;
+//   try {
+//     const session = await loginCard(cardNumber, pin, headless);
+//     if (!session) return null;
+//     try {
+//       const result = await fetchDataFromSession(session);
+//       return result;
+//     } finally {
+//       await closeSession(session);
+//     }
+//   } catch (e) {
+//     console.error('The Gift Card number or Access Code is incorrect.', e);
+//   } finally {
+//     // browser closed in closeSession when using loginCard
+//   }
+// }
+
+// Login and return a session object containing browser/context/page
+export async function loginCard(cardNumber: string, pin: string, headless = false) {
   const url = 'https://www.everyday.com.au/gift-cards/check-balance';
   let browser: Browser | null = null;
   try {
@@ -277,72 +299,66 @@ export async function GetResult(cardNumber: string, pin: string, headless = fals
 
     const filledCard = await findAndFill(page, SELECTORS.card, cardNumber);
     const filledPin = await findAndFill(page, SELECTORS.pin, pin);
-    if (!filledCard || !filledPin) return null;
+    if (!filledCard || !filledPin) {
+      await browser.close();
+      return null;
+    }
 
     await clickFirst(page, SELECTORS.submit);
-    // Wait for result page; throw if not reached within timeout
-    await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 10000 });
+    await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 10000 }).catch(() => null);
 
-    const raw = await extractRawFromPage(page);
+    return { browser, context, page, cardNumber };
+  } catch (e) {
+    try { if (browser) await browser.close(); } catch {}
+    return null;
+  }
+}
+
+// Given a session returned from loginCard, extract and normalize result
+export async function fetchDataFromSession(session: any) {
+  if (!session || !session.page) return null;
+  try {
+    const raw = await extractRawFromPage(session.page);
     const rawWithBalances = attachBalances(raw);
-    // ensure returned cardNumber is the original client input
-    try { rawWithBalances.cardNumber = cardNumber; } catch {}
+    try { rawWithBalances.cardNumber = session.cardNumber || session.cardNumber === null ? session.cardNumber : rawWithBalances.cardNumber; } catch {}
     return transformResult(rawWithBalances);
   } catch (e) {
-    console.error('The Gift Card number or Access Code is incorrect.', e);
-  } finally {
-    if (browser) await browser.close();
+    return null;
   }
 }
 
-export function AccountFromDetails(details: any, id?: string) {
-  if (!details) return null;
-  return {
-    id: details.cardNumber || id,
-    name: 'Everyday Gift Card',
-    balance: details.balance,
-    currency: details.currency || 'AUD'
-  };
-}
-
-export function TransactionsFromDetails(details: any, id?: string) {
-  if (!details || !Array.isArray(details.transactions)) return [];
-  return details.transactions.map((t: any, idx: number) => ({
-    transactionId: `${id}-${idx + 1}`,
-    transactionTime: t.date,
-    amount: t.amount,
-    currency: t.currency || details.currency || 'AUD',
-    description: t.description,
-    status: 'confirmed',
-    balance: t.balance
-  }));
-}
-
-async function main() {
-  const argv: string[] = process.argv.slice(2);
-  if (argv.length < 2) {
-    console.log('Usage: ts-node everyday.ts <cardNumber> <pin> [--mode=headless|headed]');
-    await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
-    return;
-  }
-  const card = argv[0];
-  const pin = argv[1];
-  const modeArg = argv.find(a => a.startsWith('--mode='));
-  const headless = modeArg ? modeArg.split('=')[1] === 'headless' : false;
-
+export async function closeSession(session: any) {
+  if (!session) return;
   try {
-    const details = await GetResult(card, pin, headless);
-    if (!details) {
-      console.error(JSON.stringify({ error: 'no details returned' }));
-      process.exitCode = 1;
-      return;
-    }
-    console.log(JSON.stringify(details, null, 2));
-  } catch (err) {
-    console.error(JSON.stringify({ error: String(err) }));
-    process.exitCode = 1;
-    return;
-  }
+    if (session.browser) await session.browser.close();
+  } catch (_) {}
 }
 
-if (require.main === module) main();
+// async function main() {
+//   const argv: string[] = process.argv.slice(2);
+//   if (argv.length < 2) {
+//     console.log('Usage: ts-node everyday.ts <cardNumber> <pin> [--mode=headless|headed]');
+//     await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
+//     return;
+//   }
+//   const card = argv[0];
+//   const pin = argv[1];
+//   const modeArg = argv.find(a => a.startsWith('--mode='));
+//   const headless = modeArg ? modeArg.split('=')[1] === 'headless' : false;
+
+//   try {
+//     const details = await GetResult(card, pin, headless);
+//     if (!details) {
+//       console.error(JSON.stringify({ error: 'no details returned' }));
+//       process.exitCode = 1;
+//       return;
+//     }
+//     console.log(JSON.stringify(details, null, 2));
+//   } catch (err) {
+//     console.error(JSON.stringify({ error: String(err) }));
+//     process.exitCode = 1;
+//     return;
+//   }
+// }
+
+// if (require.main === module) main();
