@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
 import { loginCard, fetchDataFromSession, closeSession } from './everyday';
+import { randomBytes } from 'crypto';
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
@@ -80,11 +81,20 @@ const resolvers = {
         };
 
         const { entry, key } = resolveSessionAndKey(identifier as string | undefined);
-        if (!entry) return [];
+        if (!entry) {
+          if (identifier) throw new Error('Invalid or expired identifier');
+          return [];
+        }
         const session: any = await entry;
-        if (!session) return [];
+        if (!session) {
+          if (identifier) throw new Error('Invalid or expired identifier');
+          return [];
+        }
         const details: any = await fetchDataFromSession(session);
-        if (!details) return [];
+        if (!details) {
+          if (identifier) throw new Error('Failed to fetch account details');
+          return [];
+        }
 
         // close browser and clear cache after successful fetch
         try { await closeSession(session); } catch (_) {}
@@ -117,11 +127,20 @@ const resolvers = {
         };
 
         const { entry, key } = resolveSessionAndKey(identifier as string | undefined);
-        if (!entry) return [];
+        if (!entry) {
+          if (identifier) throw new Error('Invalid or expired identifier');
+          return [];
+        }
         const session: any = await entry;
-        if (!session) return [];
+        if (!session) {
+          if (identifier) throw new Error('Invalid or expired identifier');
+          return [];
+        }
         const details: any = await fetchDataFromSession(session);
-        if (!details || !Array.isArray(details.transactions)) return [];
+        if (!details || !Array.isArray(details.transactions)) {
+          if (identifier) throw new Error('Failed to fetch transactions');
+          return [];
+        }
 
         // Prefer the card number from details as a human-friendly id prefix when available,
         // otherwise fall back to legacy or random identifier behavior
@@ -165,14 +184,9 @@ const resolvers = {
           else if (typeof payload.headless === 'string') useHeadless = payload.headless !== 'false';
         }
 
-        if (!card) return { response: 'error', identifier: '' };
+        if (!card) return { response: 'fail', identifier: null };
 
-        // generate a random base36 identifier and ensure uniqueness
-        let identifier: string;
-        do {
-          identifier = Math.random().toString(36).slice(2);
-        } while (sessionCache.has(identifier));
-
+        const identifier = randomBytes(4).toString('hex');
         // store the pending session promise so concurrent requests share the same work
         sessionCache.set(identifier, loginCard(card, pin || '', useHeadless));
 
@@ -182,9 +196,24 @@ const resolvers = {
           // login failed (wrong credentials) -> return fail and null identifier
           return { response: 'fail', identifier: null };
         }
+        // Verify the page actually navigated to the expected result URL.
+        try {
+          const currentUrl = session && session.page && typeof session.page.url === 'function'
+            ? session.page.url()
+            : (session && session.page && (session.page.url || null));
+          if (!currentUrl || !String(currentUrl).includes('/gift-cards/check-balance-result')) {
+            try { await closeSession(session); } catch (_) {}
+            sessionCache.delete(identifier);
+            return { response: 'fail', identifier: null };
+          }
+        } catch (_) {
+          try { await closeSession(session); } catch (_) {}
+          sessionCache.delete(identifier);
+          return { response: 'fail', identifier: null };
+        }
         return { response: 'success', identifier };
       } catch (e: any) {
-        return { response: (e && e.message) ? e.message : 'error', identifier: '' };
+        return { response: (e && e.message) ? e.message : 'fail', identifier: null };
       }
     }
   }

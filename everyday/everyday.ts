@@ -305,7 +305,7 @@ export async function loginCard(cardNumber: string, pin: string, headless = fals
     }
 
     await clickFirst(page, SELECTORS.submit);
-    await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 10000 }).catch(() => null);
+    await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 8000 }).catch(() => null);
 
     return { browser, context, page, cardNumber };
   } catch (e) {
