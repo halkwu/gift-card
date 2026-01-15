@@ -423,3 +423,79 @@ async function main() {
 }
 
 if (require.main === module) main();
+
+// Session-based helpers to match the `everyday` module interface
+export async function loginCard(cardNumber: string, pin: string, headless = false) {
+  const url = 'https://www.giftcards.com.au/CheckBalance';
+  let browser: any = null;
+  try {
+    const { browser: b, context, launchedPid } = await launchBrowser(headless);
+    browser = b;
+    const page = await context.newPage();
+
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    const filled = await fillInputs(page, cardNumber, pin);
+    if (!filled) {
+      try { if (browser) await browser.close(); } catch {}
+      return null;
+    }
+
+    await solveRecaptchaAndSubmit(page);
+
+    await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 8000 }).catch(() => null);
+
+    return { browser, context, page, cardNumber, launchedPid };
+  } catch (e) {
+    try { if (browser) await browser.close(); } catch {}
+    return null;
+  }
+}
+
+export async function fetchDataFromSession(session: any) {
+  if (!session || !session.page) return null;
+  try {
+    const { balance, expiryDate } = await extractBalance(session.page);
+    const txs = await extractTransactions(session.page);
+
+    const transactions = Array.isArray(txs) ? txs.map((t: any) => ({
+      transactionTime: t.date || null,
+      date: t.date || null,
+      description: t.description || null,
+      amount: typeof t.amount === 'number' ? t.amount : parseNumFromString(t.amount || null),
+      balance: typeof t.balance === 'number' ? t.balance : parseNumFromString(t.balance || null),
+      currency: t.currency || 'AUD'
+    })) : [];
+
+    const result = {
+      balance: typeof balance === 'number' ? balance : parseNumFromString((balance as any) || null),
+      currency: 'AUD',
+      cardNumber: session.cardNumber || null,
+      expiryDate: expiryDate || null,
+      purchases: Array.isArray(transactions) ? transactions.length : 0,
+      transactions
+    };
+
+    return result;
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function closeSession(session: any) {
+  if (!session) return;
+  try {
+    if (session.browser) {
+      if (session.browser.disconnect) {
+        try { await session.browser.disconnect(); } catch {}
+      }
+      try { await session.browser.close(); } catch {}
+    }
+    if (session.launchedPid) {
+      try {
+        const cp = require('child_process');
+        cp.execSync(`taskkill /PID ${session.launchedPid} /T /F`);
+      } catch (e) {}
+    }
+  } catch (e) {}
+}

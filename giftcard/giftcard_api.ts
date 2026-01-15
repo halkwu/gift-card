@@ -1,10 +1,13 @@
-import { ApolloServer } from 'apollo-server';
+import { ApolloServer} from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
-import { GetResult } from './giftcard';
+import { loginCard, fetchDataFromSession, closeSession } from './giftcard';
+import { randomBytes } from 'crypto';
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
+
+const sessionCache = new Map<string, Promise<any> | any>();
 
 const JSONScalar = new GraphQLScalarType({
   name: 'JSON',
@@ -34,23 +37,6 @@ const JSONScalar = new GraphQLScalarType({
   }
 });
 
-const DateScalar = new GraphQLScalarType({
-  name: 'Date',
-  description: 'ISO-8601 date string',
-  serialize: (value: any) => {
-    if (value instanceof Date) return value.toISOString();
-    if (typeof value === 'string') return value;
-    return null;
-  },
-  parseValue: (value: any) => {
-    return value ? new Date(value) : null;
-  },
-  parseLiteral: (ast: any) => {
-    if (ast.kind === Kind.STRING) return new Date(ast.value);
-    return null;
-  }
-});
-
 function parseLiteral(ast: any): any {
   switch (ast.kind) {
     case Kind.STRING:
@@ -74,22 +60,49 @@ function parseLiteral(ast: any): any {
 }
 
 const resolvers = {
-  Date: DateScalar,
   JSON: JSONScalar,
   Query: {
-    Account: async (_: any, { id, pin, headless }: { id: string, pin: string, headless?: boolean }, context: any) => {
-      const useHeadless = typeof headless === 'boolean' ? headless : true;
-      const key = `${id}:${pin}:${useHeadless}`;
+    account: async (_: any, { identifier }: { identifier?: string }, context: any) => {
       try {
-        if (!context.fetchCache) context.fetchCache = new Map();
-        if (!context.fetchCache.has(key)) {
-          context.fetchCache.set(key, GetResult(id, pin || '', useHeadless));
+        // Support both new random identifier keys and legacy `card:pin:headless` keys
+        const resolveSessionAndKey = (ident?: string) => {
+          if (!ident) return { entry: null as any, key: null as any };
+          // If identifier looks like legacy (has ':'), prefer legacy key if present
+          if (ident.includes(':')) {
+            const parts = ident.split(':');
+            const id = parts[0] || '';
+            const pin = parts[1] || '';
+            const useHeadless = parts.length >= 3 ? parts[2] !== 'false' : true;
+            const legacyKey = `${id}:${pin}:${useHeadless}`;
+            if (sessionCache.has(legacyKey)) return { entry: sessionCache.get(legacyKey), key: legacyKey };
+            // otherwise fallthrough to treat `ident` as direct key
+          }
+          return { entry: sessionCache.get(ident), key: ident };
+        };
+
+        const { entry, key } = resolveSessionAndKey(identifier as string | undefined);
+        if (!entry) {
+          if (identifier) throw new Error('Invalid or expired identifier');
+          return [];
         }
-        const details: any = await context.fetchCache.get(key);
-        if (!details) return [];
+        const session: any = await entry;
+        if (!session) {
+          if (identifier) throw new Error('Invalid or expired identifier');
+          return [];
+        }
+        const details: any = await fetchDataFromSession(session);
+        if (!details) {
+          if (identifier) throw new Error('Failed to fetch account details');
+          return [];
+        }
+
+        // close browser and clear cache after successful fetch
+        try { await closeSession(session); } catch (_) {}
+        if (key) sessionCache.delete(key);
+
         return [{
-          id: details.cardNumber || id,
-          name: 'Everyday Gift Card',
+          id: details.cardNumber,
+          name: 'Giftcard',
           balance: details.balance,
           currency: details.currency || 'AUD'
         }];
@@ -98,31 +111,107 @@ const resolvers = {
         throw new Error(msg);
       }
     },
-    Transaction: async (_: any, { id, pin, headless }: { id: string, pin: string, headless?: boolean }, context: any) => {
-      const useHeadless = typeof headless === 'boolean' ? headless : true;
-      const key = `${id}:${pin}:${useHeadless}`;
+    transaction: async (_: any, { identifier }: { identifier?: string }, context: any) => {
       try {
-        if (!context.fetchCache) context.fetchCache = new Map();
-        if (!context.fetchCache.has(key)) {
-          context.fetchCache.set(key, GetResult(id, pin || '', useHeadless));
+        const resolveSessionAndKey = (ident?: string) => {
+          if (!ident) return { entry: null as any, key: null as any };
+          if (ident.includes(':')) {
+            const parts = ident.split(':');
+            const id = parts[0] || '';
+            const pin = parts[1] || '';
+            const useHeadless = parts.length >= 3 ? parts[2] !== 'false' : true;
+            const legacyKey = `${id}:${pin}:${useHeadless}`;
+            if (sessionCache.has(legacyKey)) return { entry: sessionCache.get(legacyKey), key: legacyKey };
+          }
+          return { entry: sessionCache.get(ident), key: ident };
+        };
+
+        const { entry, key } = resolveSessionAndKey(identifier as string | undefined);
+        if (!entry) {
+          if (identifier) throw new Error('Invalid or expired identifier');
+          return [];
         }
-        const details: any = await context.fetchCache.get(key);
-        if (!details || !Array.isArray(details.transactions)) return [];
-        return details.transactions.map((t: any, idx: number) => {
-          const d = new Date(String(t.date));
-          return {
-            transactionId: `${id}-${idx+1}`,
-            transactionTime: isNaN(d.getTime()) ? null : d.toISOString(),
-            amount: t.amount,
-            currency: t.currency || details.currency || 'AUD',
-            description: t.description,
-            status: 'confirmed',
-            balance: t.balance,
-          };
-        });
+        const session: any = await entry;
+        if (!session) {
+          if (identifier) throw new Error('Invalid or expired identifier');
+          return [];
+        }
+        const details: any = await fetchDataFromSession(session);
+        if (!details || !Array.isArray(details.transactions)) {
+          if (identifier) throw new Error('Failed to fetch transactions');
+          return [];
+        }
+
+        const prefix = (details && details.cardNumber) ? details.cardNumber : ((identifier && identifier.includes(':')) ? identifier.split(':')[0] : identifier || '');
+
+        // close browser and clear cache after successful fetch
+        try { await closeSession(session); } catch (_) {}
+        if (key) sessionCache.delete(key);
+
+        return details.transactions.map((t: any, idx: number) => ({
+          transactionId: `${prefix}-${idx + 1}`,
+          transactionTime: t.transactionTime || t.date,
+          amount: t.amount,
+          currency: t.currency || details.currency || 'AUD',
+          description: t.description,
+          status: 'confirmed',
+          balance: t.balance,
+        }));
       } catch (err: any) {
         const msg = err && err.message ? err.message : 'Failed to fetch transactions';
         throw new Error(msg);
+      }
+    }
+  },
+  Mutation: {
+    auth: async (_: any, { payload }: { payload: any }) => {
+      try {
+        let card = '';
+        let pin = '';
+        let useHeadless = false; // default to headless sessions
+
+        if (typeof payload === 'string') {
+          const parts = payload.split(':');
+          card = parts[0] || '';
+          pin = parts[1] || '';
+          if (parts.length >= 3) useHeadless = parts[2] !== 'false';
+        } else if (payload && typeof payload === 'object') {
+          card = payload.cardNumber || payload.id || payload.identifier || '';
+          pin = payload.pin || '';
+          if (typeof payload.headless === 'boolean') useHeadless = payload.headless;
+          else if (typeof payload.headless === 'string') useHeadless = payload.headless !== 'false';
+        }
+
+        if (!card) return { response: 'fail', identifier: null };
+
+        const identifier = randomBytes(4).toString('hex');
+        // store the pending session promise so concurrent requests share the same work
+        sessionCache.set(identifier, loginCard(card, pin || '', useHeadless));
+
+        const session = await sessionCache.get(identifier);
+        if (!session) {
+          sessionCache.delete(identifier);
+          // login failed (wrong credentials) -> return fail and null identifier
+          return { response: 'fail', identifier: null };
+        }
+        // Verify the page actually navigated to the expected result URL.
+        try {
+          const currentUrl = session && session.page && typeof session.page.url === 'function'
+            ? session.page.url()
+            : (session && session.page && (session.page.url || null));
+          if (!currentUrl || !String(currentUrl).includes('CheckBalance/TransactionHistory')) {
+            try { await closeSession(session); } catch (_) {}
+            sessionCache.delete(identifier);
+            return { response: 'fail', identifier: null };
+          }
+        } catch (_) {
+          try { await closeSession(session); } catch (_) {}
+          sessionCache.delete(identifier);
+          return { response: 'fail', identifier: null };
+        }
+        return { response: 'success', identifier };
+      } catch (e: any) {
+        return { response: (e && e.message) ? e.message : 'fail', identifier: null };
       }
     }
   }
@@ -134,7 +223,7 @@ async function start() {
   console.log(`GraphQL server running at ${url}`);
 }
 
-start().catch((err) => {
-  console.error('Failed to start GraphQL server:', err);
+start().catch((e) => {
+  console.error('Failed to start GraphQL server', e);
   process.exit(1);
 });
