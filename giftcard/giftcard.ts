@@ -344,85 +344,85 @@ async function extractTransactions(page: Page): Promise<Transaction[]> {
   return transactions;
 }
 
-export async function GetResult(cardNumber: string, pin: string, headless = false) {
-  const url = 'https://www.giftcards.com.au/CheckBalance';
-  let browser: any = null;
-  let launchedPid: number | null = null;
-  let connectedOverCDP = false;
-  try {
-    const { browser: b, context, launchedPid: pid } = await launchBrowser(headless);
-    browser = b;
-    launchedPid = pid;
-    connectedOverCDP = true;
-    const page = await context.newPage();
+// export async function GetResult(cardNumber: string, pin: string, headless = false) {
+//   const url = 'https://www.giftcards.com.au/CheckBalance';
+//   let browser: any = null;
+//   let launchedPid: number | null = null;
+//   let connectedOverCDP = false;
+//   try {
+//     const { browser: b, context, launchedPid: pid } = await launchBrowser(headless);
+//     browser = b;
+//     launchedPid = pid;
+//     connectedOverCDP = true;
+//     const page = await context.newPage();
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    const filled = await fillInputs(page, cardNumber, pin);
-    if (!filled) return null;
+//     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+//     const filled = await fillInputs(page, cardNumber, pin);
+//     if (!filled) return null;
 
-    await solveRecaptchaAndSubmit(page);
+//     await solveRecaptchaAndSubmit(page);
 
-    await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 2000 });
+//     await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 2000 });
 
-    const { balance, expiryDate } = await extractBalance(page);
-    const transactions = await extractTransactions(page);
-    const result: GiftCardResult = {
-      balance,
-      currency: 'AUD',
-      cardNumber: cardNumber.replace(/\D/g, '') || null,
-      expiryDate,
-      purchases: transactions.length,
-      transactions
-    };
-    return result;
-  } catch (e) {
-    console.error('The Gift Card number or PIN is incorrect.', e);
-  } finally {
-    try {
-      if (browser) {
-          if (connectedOverCDP) {
-            if ((browser as any).disconnect) {
-              await (browser as any).disconnect(); 
-            }
-            if (launchedPid) {
-                const cp = require('child_process');
-                cp.execSync(`taskkill /PID ${launchedPid} /T /F`);
-            }
-          }
-      }
-    } catch (e) {
-      console.error('Error during browser cleanup:', e);
-    }
-  }
-}
+//     const { balance, expiryDate } = await extractBalance(page);
+//     const transactions = await extractTransactions(page);
+//     const result: GiftCardResult = {
+//       balance,
+//       currency: 'AUD',
+//       cardNumber: cardNumber.replace(/\D/g, '') || null,
+//       expiryDate,
+//       purchases: transactions.length,
+//       transactions
+//     };
+//     return result;
+//   } catch (e) {
+//     console.error('The Gift Card number or PIN is incorrect.', e);
+//   } finally {
+//     try {
+//       if (browser) {
+//           if (connectedOverCDP) {
+//             if ((browser as any).disconnect) {
+//               await (browser as any).disconnect(); 
+//             }
+//             if (launchedPid) {
+//                 const cp = require('child_process');
+//                 cp.execSync(`taskkill /PID ${launchedPid} /T /F`);
+//             }
+//           }
+//       }
+//     } catch (e) {
+//       console.error('Error during browser cleanup:', e);
+//     }
+//   }
+// }
 
-async function main() {
-  const argv: string[] = process.argv.slice(2);
-  if (argv.length < 2) {
-    console.log('Usage: ts-node giftcard.ts <cardNumber> <pin>');
-    await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
-    return;
-  }
-  const card = argv[0];
-  const pin = argv[1];
-  const headless = false;
+// async function main() {
+//   const argv: string[] = process.argv.slice(2);
+//   if (argv.length < 2) {
+//     console.log('Usage: ts-node giftcard.ts <cardNumber> <pin>');
+//     await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
+//     return;
+//   }
+//   const card = argv[0];
+//   const pin = argv[1];
+//   const headless = false;
 
-  try {
-    const details = await GetResult(card, pin, headless);
-    if (!details) {
-      console.error(JSON.stringify({ error: 'no details returned' }));
-      process.exitCode = 1;
-      return;
-    }
-    console.log(JSON.stringify(details, null, 2));
-  } catch (err) {
-    console.error(JSON.stringify({ error: String(err) }));
-    process.exitCode = 1;
-    return;
-  }
-}
+//   try {
+//     const details = await GetResult(card, pin, headless);
+//     if (!details) {
+//       console.error(JSON.stringify({ error: 'no details returned' }));
+//       process.exitCode = 1;
+//       return;
+//     }
+//     console.log(JSON.stringify(details, null, 2));
+//   } catch (err) {
+//     console.error(JSON.stringify({ error: String(err) }));
+//     process.exitCode = 1;
+//     return;
+//   }
+// }
 
-if (require.main === module) main();
+// if (require.main === module) main();
 
 // Session-based helpers to match the `everyday` module interface
 export async function loginCard(cardNumber: string, pin: string, headless = false) {
@@ -443,7 +443,7 @@ export async function loginCard(cardNumber: string, pin: string, headless = fals
 
     await solveRecaptchaAndSubmit(page);
 
-    await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 8000 }).catch(() => null);
+    await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 3000 }).catch(() => null);
 
     return { browser, context, page, cardNumber, launchedPid };
   } catch (e) {
@@ -467,7 +467,7 @@ export async function fetchDataFromSession(session: any) {
       currency: t.currency || 'AUD'
     })) : [];
 
-    const result = {
+    const result : GiftCardResult = {
       balance: typeof balance === 'number' ? balance : parseNumFromString((balance as any) || null),
       currency: 'AUD',
       cardNumber: session.cardNumber || null,
