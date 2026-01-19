@@ -1,5 +1,5 @@
-import { firefox } from 'playwright';
-import type { Page, Locator, Browser } from 'playwright';
+import { chromium, Browser, BrowserContext, Locator, Page } from 'playwright';
+import { randomBytes } from 'crypto';
 
 interface Transaction {
   // raw extraction may use `date`; normalized output uses `transactionTime`
@@ -114,14 +114,6 @@ async function clickFirst(
   return false;
 }
 
-async function launchBrowser(headless: boolean): Promise<{ browser: Browser, context: any, launchedPid: number | null }> {
-  const browser = await firefox.launch({ headless, firefoxUserPrefs: { 'network.http.http2.enabled': false } });
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  });
-  return { browser, context, launchedPid: null };
-}
-
 function parseNumFromString(s: string | null) {
   if (!s) return null;
   const parenNeg = /\([^)]*\)/.test(s) && !/\-/.test(s);
@@ -175,6 +167,20 @@ function attachBalances(obj: any) {
   }
   obj.transactions = tx;
   return obj;
+}
+
+// --- Shared browser/session management ---
+let browserInstance: Browser | null = null;
+const sessionStore = new Map<string, { context: BrowserContext; page: Page; verified?: boolean; cardNumber?: string | null }>();
+
+async function ensureBrowser(headless = true): Promise<Browser> {
+  if (!browserInstance) {
+    browserInstance = await chromium.launch({ headless });
+    process.on('exit', async () => {
+      try { await browserInstance?.close(); } catch (_) {}
+    });
+  }
+  return browserInstance;
 }
 
 function transformResult(obj: any): GiftCardResult | null {
@@ -268,71 +274,69 @@ async function extractRawFromPage(page: Page): Promise<any> {
   return { balance, cardNumber: cardNum, expiryDate, purchases, transactions };
 }
 
-// export async function GetResult(cardNumber: string, pin: string, headless = false) {
-//   const url = 'https://www.everyday.com.au/gift-cards/check-balance';
-//   let browser: Browser | null = null;
-//   try {
-//     const session = await loginCard(cardNumber, pin, headless);
-//     if (!session) return null;
-//     try {
-//       const result = await fetchDataFromSession(session);
-//       return result;
-//     } finally {
-//       await closeSession(session);
-//     }
-//   } catch (e) {
-//     console.error('The Gift Card number or Access Code is incorrect.', e);
-//   } finally {
-//     // browser closed in closeSession when using loginCard
-//   }
-// }
-
-// Login and return a session object containing browser/context/page
-export async function loginCard(cardNumber: string, pin: string, headless = false) {
-  const url = 'https://www.everyday.com.au/gift-cards/check-balance';
-  let browser: Browser | null = null;
+export async function requestSession(cardNumber?: string, pin?: string, headless = false): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
+  const browser = await ensureBrowser(headless);
+	const context = await browser.newContext();
+	const page = await context.newPage();
   try {
-    const { browser: b, context } = await launchBrowser(headless);
-    browser = b;
-    const page = await context.newPage();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const url = 'https://www.everyday.com.au/gift-cards/check-balance';
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
-    const filledCard = await findAndFill(page, SELECTORS.card, cardNumber);
-    const filledPin = await findAndFill(page, SELECTORS.pin, pin);
-    if (!filledCard || !filledPin) {
-      await browser.close();
-      return null;
+    const filledCard = cardNumber ? await findAndFill(page, SELECTORS.card, cardNumber) : false;
+    const filledPin = pin ? await findAndFill(page, SELECTORS.pin, pin) : false;
+    if ((cardNumber && !filledCard) || (pin && !filledPin)) {
+      await context.close().catch(() => {});
+      return { identifier: null, storageState: null, response: 'fail' };
     }
 
-    await clickFirst(page, SELECTORS.submit);
-    await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 8000 }).catch(() => null);
+    await clickFirst(page, SELECTORS.submit).catch(() => {});
+    const navigated = await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 4000 }).then(() => true).catch(() => false);
 
-    return { browser, context, page, cardNumber };
+    if (!navigated) {
+      // If the page didn't navigate to the expected result URL, treat as failure.
+      await context.close().catch(() => {});
+      return { identifier: null, storageState: null, response: 'fail' };
+    }
+
+    const storageState = await context.storageState().catch(() => null);
+    const identifier = randomBytes(4).toString('hex');
+    sessionStore.set(identifier, { context, page, verified: true, cardNumber: cardNumber ?? null });
+    return { identifier, storageState, response: 'success' };
   } catch (e) {
-    try { if (browser) await browser.close(); } catch {}
-    return null;
+    await context.close().catch(() => {});
+    return { identifier: null, storageState: null, response: 'fail' };
   }
 }
 
-// Given a session returned from loginCard, extract and normalize result
-export async function fetchDataFromSession(session: any) {
-  if (!session || !session.page) return null;
-  try {
-    const raw = await extractRawFromPage(session.page);
-    const rawWithBalances = attachBalances(raw);
-    try { rawWithBalances.cardNumber = session.cardNumber || session.cardNumber === null ? session.cardNumber : rawWithBalances.cardNumber; } catch {}
-    return transformResult(rawWithBalances);
-  } catch (e) {
-    return null;
-  }
-}
+export async function queryWithSession(storageIdentifier: any): Promise<GiftCardResult | null> {
+  if (!storageIdentifier) return null;
 
-export async function closeSession(session: any) {
-  if (!session) return;
-  try {
-    if (session.browser) await session.browser.close();
-  } catch (_) {}
-}
+		let identifier: string | undefined;
+		if (typeof storageIdentifier === 'string') {
+			identifier = storageIdentifier;
+		} else if (typeof storageIdentifier === 'object' && storageIdentifier !== null && typeof storageIdentifier.identifier === 'string') {
+			identifier = storageIdentifier.identifier;
+		} else {
+			return null;
+		}
+
+		if (!identifier || !sessionStore.has(identifier)) return null;
+		const stored = sessionStore.get(identifier) as any;
+		if (!stored || stored.verified !== true) return null;
+    const page = stored.page;
+      await page.bringToFront?.().catch(() => {});
+    try {
+      const raw = await extractRawFromPage(page);
+      const rawWithBalances = attachBalances(raw);
+      try { rawWithBalances.cardNumber = stored.cardNumber ?? rawWithBalances.cardNumber; } catch {}
+      const result = transformResult(rawWithBalances);
+      await stored.context.close().catch(() => {});
+      try { sessionStore.delete(identifier); } catch (_) {}
+      return result;
+    } catch (e) {
+      return null;
+    }
+  }
 
 // async function main() {
 //   const argv: string[] = process.argv.slice(2);

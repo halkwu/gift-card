@@ -2,12 +2,45 @@ import { ApolloServer} from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
-import { loginCard, fetchDataFromSession, closeSession } from './everyday';
-import { randomBytes } from 'crypto';
+import { requestSession, queryWithSession } from './everyday';
+
+// Concurrency / queueing: allow up to 3 concurrent active sessions;
+// additional auth requests are queued FIFO until a slot becomes available.
+const MAX_CONCURRENT = 3;
+let activeCount = 0;
+const waitQueue: Array<{ id: number; resolve: () => void }> = [];
+let nextProcessId = 1;
+let releaseCount = 0;
+const heldIdentifiers = new Set<string>();
+
+function acquireSlot(): Promise<void> {
+  if (activeCount < MAX_CONCURRENT) {
+    activeCount++;
+    console.log(`[concurrency] acquired slot -> active=${activeCount}, queue=${waitQueue.length}`);
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const id = nextProcessId++;
+    waitQueue.push({ id, resolve });
+    console.log(`[concurrency] queued process#${id} -> active=${activeCount}, queue=${waitQueue.length}`);
+  });
+}
+
+function releaseSlot() {
+  if (activeCount <= 0) return;
+  activeCount--;
+  releaseCount++;
+  const next = waitQueue.shift();
+  console.log(`[concurrency] released ${releaseCount} slot(s)`);
+  if (next) {
+    // allocate slot for next waiter then notify it
+    activeCount++;
+    console.log(`[concurrency] handing slot to process#${next.id} -> active=${activeCount}, queue=${waitQueue.length}`);
+    try { next.resolve(); } catch (e) { /* ignore */ }
+  }
+}
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
-
-const sessionCache = new Map<string, Promise<any> | any>();
 
 const JSONScalar = new GraphQLScalarType({
   name: 'JSON',
@@ -62,103 +95,77 @@ function parseLiteral(ast: any): any {
 const resolvers = {
   JSON: JSONScalar,
   Query: {
-    account: async (_: any, { identifier }: { identifier?: string }, context: any) => {
+    account: async (_: any, args: any, context: any) => {
       try {
-        // Support both new random identifier keys and legacy `card:pin:headless` keys
-        const resolveSessionAndKey = (ident?: string) => {
-          if (!ident) return { entry: null as any, key: null as any };
-          // If identifier looks like legacy (has ':'), prefer legacy key if present
-          if (ident.includes(':')) {
-            const parts = ident.split(':');
-            const id = parts[0] || '';
-            const pin = parts[1] || '';
-            const useHeadless = parts.length >= 3 ? parts[2] !== 'false' : true;
-            const legacyKey = `${id}:${pin}:${useHeadless}`;
-            if (sessionCache.has(legacyKey)) return { entry: sessionCache.get(legacyKey), key: legacyKey };
-            // otherwise fallthrough to treat `ident` as direct key
+
+        const storageIdentifier = args && args.identifier ? args.identifier : null;
+        if (!storageIdentifier) throw new Error('Invalid or expired identifier');
+
+        const key = typeof storageIdentifier === 'string'
+          ? storageIdentifier
+          : (storageIdentifier && storageIdentifier.identifier) || null;
+        if (!key) throw new Error('Invalid or expired identifier');
+
+        if (!context.fetchCache) context.fetchCache = new Map();
+        if (!context.fetchCache.has(key)) {
+
+          context.fetchCache.set(key, (queryWithSession as any)(storageIdentifier));
+        }
+        const details: any = await context.fetchCache.get(key);
+        try {
+          if (!details) throw new Error('Invalid or expired identifier');
+          return [{
+            id: details.cardNumber,
+            name: 'Everyday Gift Card',
+            balance: details.balance,
+            currency: details.currency
+          }];
+        } finally {
+          if (key && heldIdentifiers.has(key)) {
+            heldIdentifiers.delete(key);
+            releaseSlot();
           }
-          return { entry: sessionCache.get(ident), key: ident };
-        };
-
-        const { entry, key } = resolveSessionAndKey(identifier as string | undefined);
-        if (!entry) {
-          if (identifier) throw new Error('Invalid or expired identifier');
-          return [];
         }
-        const session: any = await entry;
-        if (!session) {
-          if (identifier) throw new Error('Invalid or expired identifier');
-          return [];
-        }
-        const details: any = await fetchDataFromSession(session);
-        if (!details) {
-          if (identifier) throw new Error('Failed to fetch account details');
-          return [];
-        }
-
-        // close browser and clear cache after successful fetch
-        try { await closeSession(session); } catch (_) {}
-        if (key) sessionCache.delete(key);
-
-        return [{
-          id: details.cardNumber,
-          name: 'Everyday Gift Card',
-          balance: details.balance,
-          currency: details.currency || 'AUD'
-        }];
       } catch (err: any) {
         const msg = err && err.message ? err.message : 'Failed to fetch account';
         throw new Error(msg);
       }
     },
-    transaction: async (_: any, { identifier }: { identifier?: string }, context: any) => {
+    
+    transaction: async (_: any, args: any, context: any) => {
       try {
-        const resolveSessionAndKey = (ident?: string) => {
-          if (!ident) return { entry: null as any, key: null as any };
-          if (ident.includes(':')) {
-            const parts = ident.split(':');
-            const id = parts[0] || '';
-            const pin = parts[1] || '';
-            const useHeadless = parts.length >= 3 ? parts[2] !== 'false' : true;
-            const legacyKey = `${id}:${pin}:${useHeadless}`;
-            if (sessionCache.has(legacyKey)) return { entry: sessionCache.get(legacyKey), key: legacyKey };
+        const storageIdentifier = args && args.identifier ? args.identifier : null;
+        if (!storageIdentifier) throw new Error('Invalid or expired identifier');
+
+        const key = typeof storageIdentifier === 'string'
+          ? storageIdentifier
+          : (storageIdentifier && storageIdentifier.identifier) || null;
+        if (!key) throw new Error('Invalid or expired identifier');
+
+        if (!context.fetchCache) context.fetchCache = new Map();
+        if (!context.fetchCache.has(key)) {
+
+          context.fetchCache.set(key, (queryWithSession as any)(storageIdentifier));
+        }
+        const details: any = await context.fetchCache.get(key);
+        try {
+          if (!details) throw new Error('Invalid or expired identifier');
+          const prefix = details.cardNumber;
+          return details.transactions.map((t: any, idx: number) => ({
+            transactionId: `${prefix}-${idx + 1}`,
+            transactionTime: t.transactionTime,
+            amount: t.amount,
+            currency: t.currency,
+            description: t.description,
+            status: 'confirmed',
+            balance: t.balance,
+          }));
+        } finally {
+          if (key && heldIdentifiers.has(key)) {
+            heldIdentifiers.delete(key);
+            releaseSlot();
           }
-          return { entry: sessionCache.get(ident), key: ident };
-        };
-
-        const { entry, key } = resolveSessionAndKey(identifier as string | undefined);
-        if (!entry) {
-          if (identifier) throw new Error('Invalid or expired identifier');
-          return [];
         }
-        const session: any = await entry;
-        if (!session) {
-          if (identifier) throw new Error('Invalid or expired identifier');
-          return [];
-        }
-        const details: any = await fetchDataFromSession(session);
-        if (!details || !Array.isArray(details.transactions)) {
-          if (identifier) throw new Error('Failed to fetch transactions');
-          return [];
-        }
-
-        // Prefer the card number from details as a human-friendly id prefix when available,
-        // otherwise fall back to legacy or random identifier behavior
-        const prefix = (details && details.cardNumber) ? details.cardNumber : ((identifier && identifier.includes(':')) ? identifier.split(':')[0] : identifier || '');
-
-        // close browser and clear cache after successful fetch
-        try { await closeSession(session); } catch (_) {}
-        if (key) sessionCache.delete(key);
-
-        return details.transactions.map((t: any, idx: number) => ({
-          transactionId: `${prefix}-${idx + 1}`,
-          transactionTime: t.transactionTime || t.date,
-          amount: t.amount,
-          currency: t.currency || details.currency || 'AUD',
-          description: t.description,
-          status: 'confirmed',
-          balance: t.balance,
-        }));
       } catch (err: any) {
         const msg = err && err.message ? err.message : 'Failed to fetch transactions';
         throw new Error(msg);
@@ -166,61 +173,39 @@ const resolvers = {
     }
   },
   Mutation: {
-    auth: async (_: any, { payload }: { payload: any }) => {
+    auth: async (_: any, { payload }: { payload: any }, context: any) => {
       try {
-        let card = '';
-        let pin = '';
-        let useHeadless = false; // default to headless sessions
-
-        if (typeof payload === 'string') {
-          const parts = payload.split(':');
-          card = parts[0] || '';
-          pin = parts[1] || '';
-          if (parts.length >= 3) useHeadless = parts[2] !== 'false';
-        } else if (payload && typeof payload === 'object') {
-          card = payload.cardNumber || payload.id || payload.identifier || '';
-          pin = payload.pin || '';
-          if (typeof payload.headless === 'boolean') useHeadless = payload.headless;
-          else if (typeof payload.headless === 'string') useHeadless = payload.headless !== 'false';
-        }
-
-        if (!card) return { response: 'fail', identifier: null };
-
-        const identifier = randomBytes(4).toString('hex');
-        // store the pending session promise so concurrent requests share the same work
-        sessionCache.set(identifier, loginCard(card, pin || '', useHeadless));
-
-        const session = await sessionCache.get(identifier);
-        if (!session) {
-          sessionCache.delete(identifier);
-          // login failed (wrong credentials) -> return fail and null identifier
-          return { response: 'fail', identifier: null };
-        }
-        // Verify the page actually navigated to the expected result URL.
-        try {
-          const currentUrl = session && session.page && typeof session.page.url === 'function'
-            ? session.page.url()
-            : (session && session.page && (session.page.url || null));
-          if (!currentUrl || !String(currentUrl).includes('/gift-cards/check-balance-result')) {
-            try { await closeSession(session); } catch (_) {}
-            sessionCache.delete(identifier);
-            return { response: 'fail', identifier: null };
+        const { id, pin } = payload || {};
+        
+        if (id && pin) {
+          await acquireSlot();
+          try {
+            const res = await requestSession(id, pin, false);
+            if (res && res.response === 'success' && res.identifier) {
+              heldIdentifiers.add(res.identifier);
+              return { response: res.response, identifier: res.identifier };
+            }
+            // request failed, release reserved slot
+            releaseSlot();
+            return { response: res ? res.response : 'fail', identifier: null };
+          } catch (e: any) {
+            releaseSlot();
+            return { response: e && e.message ? e.message : 'error', identifier: null };
           }
-        } catch (_) {
-          try { await closeSession(session); } catch (_) {}
-          sessionCache.delete(identifier);
-          return { response: 'fail', identifier: null };
         }
-        return { response: 'success', identifier };
-      } catch (e: any) {
-        return { response: (e && e.message) ? e.message : 'fail', identifier: null };
+      } catch (err: any) {
+        return { response: err && err.message ? err.message : 'error', identifier: null };
       }
     }
   }
 };
 
 async function start() {
-  const server = new ApolloServer({ typeDefs, resolvers });
+  const server = new ApolloServer({
+    typeDefs,
+    resolvers,
+    context: ({ req }: { req: any }) => ({ headers: req ? req.headers : {}, fetchCache: new Map() })
+  });
   const { url } = await server.listen({ port: 4000 });
   console.log(`GraphQL server running at ${url}`);
 }

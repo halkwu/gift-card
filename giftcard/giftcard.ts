@@ -1,6 +1,111 @@
-import { chromium } from 'playwright';
-import type { Page, Locator } from 'playwright';
+import { randomBytes } from "crypto";
+import { chromium, Page, BrowserContext, Browser, Locator } from "playwright";
 import { launchChrome } from './launch_chrome';
+const cp = require('child_process');
+
+// --- Shared browser/session management ---
+let browserInstance: Browser | null = null;
+const sessionStore = new Map<string, { browser?: any; context: BrowserContext; page: Page; storageState?: any; verified?: boolean; cardNumber?: string | null; launchedPid?: number | null }>();
+
+// Close a single session by object or by key. Deletes sessionStore entry when key is provided/found.
+export async function closeSession(sessionOrKey?: any): Promise<void> {
+    try {
+        if (!sessionOrKey) return;
+        let s: any = null;
+        let keyToDelete: string | null = null;
+        if (typeof sessionOrKey === 'string') {
+            keyToDelete = sessionOrKey;
+            s = sessionStore.get(sessionOrKey);
+        } else {
+            s = sessionOrKey;
+        }
+        if (!s) return;
+
+        // Attempt to clear local/session storage and cookies before closing.
+        try {
+            const page = s.page as Page | undefined;
+            const context = s.context as BrowserContext | undefined;
+            if (page) {
+                try {
+                    await page.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} });
+                } catch (_) {}
+            }
+
+            if (context && typeof (context as any).clearCookies === 'function') {
+                try { await (context as any).clearCookies(); } catch (_) {}
+            } else if (page && typeof (page as any).context === 'function') {
+                try {
+                    // @ts-ignore
+                    const client = await (page as any).context().newCDPSession(page);
+                    await client.send('Network.clearBrowserCookies');
+                    try {
+                        await client.send('Storage.clearDataForOrigin', { origin: 'https://portal.australiansuper.com', storageTypes: 'all' });
+                    } catch (_) {}
+                } catch (_) {}
+            }
+        } catch (_) {}
+
+        // Close page/context/browser and kill any launched PID
+        try { if (s.page) await s.page.close().catch(() => {}); } catch (_) {}
+        try { if (s.context) await s.context.close().catch(() => {}); } catch (_) {}
+        try {
+            if (s.browser) {
+                if (s.browser.disconnect) await s.browser.disconnect().catch(() => {});
+                else await s.browser.close().catch(() => {});
+            }
+        } catch (_) {}
+        try { if (s.launchedPid) { cp.execSync(`taskkill /PID ${s.launchedPid} /T /F`); } } catch (_) {}
+
+        if (keyToDelete) {
+            try { sessionStore.delete(keyToDelete); } catch (_) {}
+        } else {
+            for (const [k, v] of sessionStore.entries()) {
+                if (v === s) { try { sessionStore.delete(k); } catch (_) {} ; break; }
+            }
+        }
+    } catch (_) {}
+}
+
+async function launchBrowser(headless = false): Promise<{ browser: any; context: any; launchedPid: number | null }> {
+    let browser: any = null;
+    let context: any = null;
+    let launchedPid: number | null = null;
+    if (!headless) {
+        try {
+            const exePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+            const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile';
+            try {
+                launchedPid = launchChrome(exePath, userDataDir, 9222);
+                if (launchedPid) console.log(`Launched Chrome (pid=${launchedPid}), waiting for CDP...`);
+            } catch (e) {
+                console.error('Error invoking launchChrome:', e);
+            }
+        } catch (e) {
+            console.error('Error preparing to launch Chrome:', e);
+        }
+
+        const start = Date.now();
+        const timeout = 10000;
+        while (Date.now() - start < timeout) {
+            try {
+                browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+                break;
+            } catch (e) {
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
+    }
+
+    if (!browser) {
+        browser = await chromium.launch({ headless });
+    }
+
+    const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
+    context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
+    // keep a reference for other helpers
+    try { browserInstance = browser; } catch (_) {}
+    return { browser, context, launchedPid };
+}
 
 async function findAndFill(page: Page, selectors: string[], value: string) {
   async function Fill(locator: any) {
@@ -90,6 +195,7 @@ async function clickFirst(
           ]);
         } catch {
           console.warn(`clickFirst: no navigation or detachment after clicking "${sel}"`);
+          return false;
         }
       }
       return true;
@@ -180,42 +286,6 @@ const SUBMIT_SELECTORS = [
   'button',
 ];
 
-async function launchBrowser(headless: boolean): Promise<{ browser: any, context: any, launchedPid: number | null }> {
-  let browser: any = null;
-  let context: any = null;
-  let launchedPid: number | null = null;
-    if (!headless) {
-      try {
-        const exePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'; // adjust as needed
-        const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile'; // adjust as needed
-        try {
-          launchedPid = launchChrome(exePath, userDataDir, 9222);
-          if (launchedPid) console.log(`Launched Chrome (pid=${launchedPid}), waiting for CDP...`);
-        } catch (e) {
-          console.error('Error invoking launchChrome:', e);
-        }
-      } catch (e) {
-        console.error('Error preparing to launch Chrome:', e);
-      }
-
-      const start = Date.now();
-      const timeout = 10000;
-      while (Date.now() - start < timeout) {
-        try {
-          browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
-          break;
-        } catch (e) {
-          await new Promise(r => setTimeout(r, 500));
-        }
-      }
-    }
-
-    const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
-    context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
-    console.log('Connected to existing browser via CDP (http)');
-    return { browser, context, launchedPid };
-}
-
 async function fillInputs(page: Page, cardNumber: string, pin: string): Promise<boolean> {
   const filledCard = await findAndFill(page, SELECTORS.card, cardNumber);
   const filledPin = await findAndFill(page, SELECTORS.pin, pin);
@@ -256,7 +326,7 @@ async function highlightRecaptcha(page: Page): Promise<void> {
   }
 }
 
-async function solveRecaptchaAndSubmit(page: Page): Promise<void> {
+async function solveRecaptchaAndSubmit(page: Page): Promise<boolean> {
   try {
     const hasRecaptcha = await page.$(RECAPTCHA_IFRAME);
 
@@ -285,9 +355,15 @@ async function solveRecaptchaAndSubmit(page: Page): Promise<void> {
         await new Promise(r => setTimeout(r, interval));
       }
     }
-    await clickFirst(page, SUBMIT_SELECTORS);
+    const clicked = await clickFirst(page, SUBMIT_SELECTORS);
+    if (!clicked) {
+      console.warn('solveRecaptchaAndSubmit: submit click failed or no navigation detected');
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error('Error in solveRecaptchaAndSubmit:', e);
+    return false;
   }
 }
 
@@ -344,122 +420,62 @@ async function extractTransactions(page: Page): Promise<Transaction[]> {
   return transactions;
 }
 
-// export async function GetResult(cardNumber: string, pin: string, headless = false) {
-//   const url = 'https://www.giftcards.com.au/CheckBalance';
-//   let browser: any = null;
-//   let launchedPid: number | null = null;
-//   let connectedOverCDP = false;
-//   try {
-//     const { browser: b, context, launchedPid: pid } = await launchBrowser(headless);
-//     browser = b;
-//     launchedPid = pid;
-//     connectedOverCDP = true;
-//     const page = await context.newPage();
-
-//     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-//     const filled = await fillInputs(page, cardNumber, pin);
-//     if (!filled) return null;
-
-//     await solveRecaptchaAndSubmit(page);
-
-//     await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 2000 });
-
-//     const { balance, expiryDate } = await extractBalance(page);
-//     const transactions = await extractTransactions(page);
-//     const result: GiftCardResult = {
-//       balance,
-//       currency: 'AUD',
-//       cardNumber: cardNumber.replace(/\D/g, '') || null,
-//       expiryDate,
-//       purchases: transactions.length,
-//       transactions
-//     };
-//     return result;
-//   } catch (e) {
-//     console.error('The Gift Card number or PIN is incorrect.', e);
-//   } finally {
-//     try {
-//       if (browser) {
-//           if (connectedOverCDP) {
-//             if ((browser as any).disconnect) {
-//               await (browser as any).disconnect(); 
-//             }
-//             if (launchedPid) {
-//                 const cp = require('child_process');
-//                 cp.execSync(`taskkill /PID ${launchedPid} /T /F`);
-//             }
-//           }
-//       }
-//     } catch (e) {
-//       console.error('Error during browser cleanup:', e);
-//     }
-//   }
-// }
-
-// async function main() {
-//   const argv: string[] = process.argv.slice(2);
-//   if (argv.length < 2) {
-//     console.log('Usage: ts-node giftcard.ts <cardNumber> <pin>');
-//     await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
-//     return;
-//   }
-//   const card = argv[0];
-//   const pin = argv[1];
-//   const headless = false;
-
-//   try {
-//     const details = await GetResult(card, pin, headless);
-//     if (!details) {
-//       console.error(JSON.stringify({ error: 'no details returned' }));
-//       process.exitCode = 1;
-//       return;
-//     }
-//     console.log(JSON.stringify(details, null, 2));
-//   } catch (err) {
-//     console.error(JSON.stringify({ error: String(err) }));
-//     process.exitCode = 1;
-//     return;
-//   }
-// }
-
-// if (require.main === module) main();
-
-// Session-based helpers to match the `everyday` module interface
-export async function loginCard(cardNumber: string, pin: string, headless = false) {
-  const url = 'https://www.giftcards.com.au/CheckBalance';
-  let browser: any = null;
+export async function requestSession(cardNumber?: string, pin?: string, headless = false): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
+  const { browser: b, context, launchedPid } = await launchBrowser(headless);
+  browserInstance = b;
+  const page = await context.newPage();
   try {
-    const { browser: b, context, launchedPid } = await launchBrowser(headless);
-    browser = b;
-    const page = await context.newPage();
+    const url = 'https://www.giftcards.com.au/CheckBalance';
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-    const filled = await fillInputs(page, cardNumber, pin);
-    if (!filled) {
-      try { if (browser) await browser.close(); } catch {}
-      return null;
+    const filledCard = cardNumber ? await fillInputs(page, cardNumber, pin || '') : false;
+    if ((cardNumber && !filledCard)) {
+      try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
+      return { identifier: null, storageState: null, response: 'fail' };
     }
 
-    await solveRecaptchaAndSubmit(page);
+    const submitted = await solveRecaptchaAndSubmit(page).catch(() => false);
+    if (!submitted) {
+      try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
+      return { identifier: null, storageState: null, response: 'fail' };
+    }
 
-    await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 3000 }).catch(() => null);
+    await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 4000 }).catch(() => null);
 
-    return { browser, context, page, cardNumber, launchedPid };
+    const storageState = await context.storageState().catch(() => null);
+    const identifier = randomBytes(4).toString('hex');
+    sessionStore.set(identifier, { context, page, verified: true, cardNumber: cardNumber ? cardNumber.replace(/\D/g, '') : null, browser: b, launchedPid });
+    return { identifier, storageState, response: 'success' };
   } catch (e) {
-    try { if (browser) await browser.close(); } catch {}
-    return null;
+    try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
+    return { identifier: null, storageState: null, response: 'fail' };
   }
 }
 
-export async function fetchDataFromSession(session: any) {
-  if (!session || !session.page) return null;
+export async function queryWithSession(storageIdentifier: any): Promise<GiftCardResult | null> {
+  if (!storageIdentifier) return null;
+
+  let identifier: string | undefined;
+  if (typeof storageIdentifier === 'string') {
+    identifier = storageIdentifier;
+  } else if (typeof storageIdentifier === 'object' && storageIdentifier !== null && typeof storageIdentifier.identifier === 'string') {
+    identifier = storageIdentifier.identifier;
+  } else {
+    return null;
+  }
+
+  if (!identifier || !sessionStore.has(identifier)) return null;
+  const stored = sessionStore.get(identifier) as any;
+  if (!stored || stored.verified !== true) return null;
+  const page = stored.page;
+  await page.bringToFront?.().catch(() => {});
   try {
-    const { balance, expiryDate } = await extractBalance(session.page);
-    const txs = await extractTransactions(session.page);
+    if (!stored.page) return null;
+    const { balance, expiryDate } = await extractBalance(stored.page);
+    const txs = await extractTransactions(stored.page);
 
     const transactions = Array.isArray(txs) ? txs.map((t: any) => ({
-      transactionTime: t.date || null,
+      transactionTime: t.transactionTime || null,
       date: t.date || null,
       description: t.description || null,
       amount: typeof t.amount === 'number' ? t.amount : parseNumFromString(t.amount || null),
@@ -467,35 +483,20 @@ export async function fetchDataFromSession(session: any) {
       currency: t.currency || 'AUD'
     })) : [];
 
-    const result : GiftCardResult = {
+    const result: GiftCardResult = {
       balance: typeof balance === 'number' ? balance : parseNumFromString((balance as any) || null),
       currency: 'AUD',
-      cardNumber: session.cardNumber || null,
+      cardNumber: stored.cardNumber || null,
       expiryDate: expiryDate || null,
       purchases: Array.isArray(transactions) ? transactions.length : 0,
       transactions
     };
 
+    try { if (result && result.cardNumber == null) result.cardNumber = stored.cardNumber ?? null; } catch (_) {}
+    try { await stored.context.close(); } catch (_) {}
+    try { sessionStore.delete(identifier); } catch (_) {}
     return result;
   } catch (e) {
     return null;
   }
-}
-
-export async function closeSession(session: any) {
-  if (!session) return;
-  try {
-    if (session.browser) {
-      if (session.browser.disconnect) {
-        try { await session.browser.disconnect(); } catch {}
-      }
-      try { await session.browser.close(); } catch {}
-    }
-    if (session.launchedPid) {
-      try {
-        const cp = require('child_process');
-        cp.execSync(`taskkill /PID ${session.launchedPid} /T /F`);
-      } catch (e) {}
-    }
-  } catch (e) {}
 }
