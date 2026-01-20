@@ -290,7 +290,7 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
     }
 
     await clickFirst(page, SELECTORS.submit).catch(() => {});
-    const navigated = await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 4000 }).then(() => true).catch(() => false);
+    const navigated = await page.waitForURL('**/gift-cards/check-balance-result**', { timeout: 8000 }).then(() => true).catch(() => false);
 
     if (!navigated) {
       // If the page didn't navigate to the expected result URL, treat as failure.
