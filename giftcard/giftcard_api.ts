@@ -148,14 +148,15 @@ const resolvers = {
             }
             // request failed, release reserved slot
             releaseSlot();
-            return { response: res ? res.response : 'fail', identifier: null };
+            return { response: 'fail', identifier: null };
           } catch (e: any) {
             releaseSlot();
-            return { response: e && e.message ? e.message : 'error', identifier: null };
+            return { response:'fail', identifier: null };
           }
         }
       } catch (err: any) {
-        return { response: err && err.message ? err.message : 'error', identifier: null };
+          releaseSlot();
+          return { response:'fail', identifier: null };
       }
     }
   }

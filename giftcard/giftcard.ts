@@ -3,14 +3,20 @@ import { chromium, Page, BrowserContext, Browser, Locator } from "playwright";
 import { launchChrome } from './launch_chrome';
 const cp = require('child_process');
 
-// --- Shared browser/session management ---
 let browserInstance: Browser | null = null;
-// Ensure only one browser launch/connect is in-flight at a time
 let launchingPromise: Promise<{ browser: any; context: any; launchedPid: number | null; reusedPage?: Page | null } | { browser: null; context: null; launchedPid: number | null; reusedPage: null }> | null = null;
 let launchedPidGlobal: number | null = null;
-// Shared context to host multiple pages (tabs) within the same browser process.
 let sharedContext: BrowserContext | null = null;
 const sessionStore = new Map<string, { browser?: any; context: BrowserContext; page: Page; storageState?: any; verified?: boolean; cardNumber?: string | null; launchedPid?: number | null }>();
+
+// Safe close helper to reduce repeated disconnect/close patterns
+async function safeCloseBrowser(browser: any) {
+  try {
+    if (!browser) return;
+    if (browser.disconnect) await browser.disconnect().catch(() => {});
+    else await browser.close().catch(() => {});
+  } catch (_) {}
+}
 
 // Close a single session by object or by key. Deletes sessionStore entry when key is provided/found.
 export async function closeSession(sessionOrKey?: any, opts?: { preserveBrowser?: boolean }): Promise<void> {
@@ -56,8 +62,6 @@ export async function closeSession(sessionOrKey?: any, opts?: { preserveBrowser?
         try { if (s.context && s.context !== sharedContext) await s.context.close().catch(() => {}); } catch (_) {}
 
         try {
-            // Only close the browser when caller did NOT request preservation.
-            // If preserveBrowser === true we will keep the browser running even if the remaining pages are about:blank.
             const shouldCloseBrowser = !preserveBrowser;
 
             if (s.browser && shouldCloseBrowser) {
@@ -68,8 +72,6 @@ export async function closeSession(sessionOrKey?: any, opts?: { preserveBrowser?
                 try { if (s.browser.disconnect) await s.browser.disconnect().catch(() => {}); } catch (_) {}
             }
         } catch (_) {}
-        // Do not kill the global browser process when closing individual sessions.
-        // The global browser is managed separately via shutdownGlobalBrowserIfNoSessions().
 
         if (keyToDelete) {
             try { sessionStore.delete(keyToDelete); } catch (_) {}
@@ -102,7 +104,6 @@ async function launchBrowser(headless = false): Promise<{ browser: any; context:
     if (browser) {
       try {
         const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
-        // Count only non-blank pages (ignore about:blank) across contexts.
         let nonBlankPages = 0;
         for (const c of existingContexts) {
           try {
@@ -113,12 +114,10 @@ async function launchBrowser(headless = false): Promise<{ browser: any; context:
           } catch (_) {}
         }
 
-        // If there are no non-blank pages, treat this browser as unused and close it.
         if (nonBlankPages === 0) {
-          try { if (browser.disconnect) await browser.disconnect().catch(() => {}); else await browser.close().catch(() => {}); } catch (_) {}
+          await safeCloseBrowser(browser);
           browser = null;
         } else {
-          // Prefer a context that contains a non-blank page.
           context = existingContexts.find((c: any) => {
             try {
               const pages = (typeof c.pages === 'function' ? c.pages() : (c.pages || [])) as Page[];
@@ -129,12 +128,11 @@ async function launchBrowser(headless = false): Promise<{ browser: any; context:
           return { browser, context, launchedPid, reusedPage };
         }
       } catch (e) {
-        try { if (browser.disconnect) await browser.disconnect().catch(() => {}); else await browser.close().catch(() => {}); } catch (_) {}
+        await safeCloseBrowser(browser);
         browser = null;
       }
     }
 
-    // No connected browser — launch Chrome via helper and connect over CDP.
     try {
       const exePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
       const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile';
@@ -169,7 +167,6 @@ async function launchBrowser(headless = false): Promise<{ browser: any; context:
     try {
       const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
       if (existingContexts && existingContexts.length) {
-        // Find a context that has a non-blank page; if none, close browser and abort.
         const contextWithNonBlank = existingContexts.find((c: any) => {
           try {
             const pages = (typeof c.pages === 'function' ? c.pages() : (c.pages || [])) as Page[];
@@ -177,7 +174,7 @@ async function launchBrowser(headless = false): Promise<{ browser: any; context:
           } catch { return false; }
         });
         if (!contextWithNonBlank) {
-          try { if (browser.disconnect) await browser.disconnect().catch(() => {}); else await browser.close().catch(() => {}); } catch (_) {}
+          try { await safeCloseBrowser(browser); } catch (_) {}
           return { browser: null, context: null, launchedPid, reusedPage: null };
         }
         context = contextWithNonBlank || existingContexts[0];
@@ -190,13 +187,13 @@ async function launchBrowser(headless = false): Promise<{ browser: any; context:
           }
         } catch (_) {}
       } else {
-        try { if (browser.disconnect) await browser.disconnect().catch(() => {}); else await browser.close().catch(() => {}); } catch (_) {}
+        await safeCloseBrowser(browser);
         return { browser: null, context: null, launchedPid, reusedPage: null };
       }
       try { browserInstance = browser; } catch (_) {}
       return { browser, context, launchedPid, reusedPage };
     } catch (e) {
-      try { if (browser.disconnect) await browser.disconnect().catch(() => {}); else await browser.close().catch(() => {}); } catch (_) {}
+      await safeCloseBrowser(browser);
       return { browser: null, context: null, launchedPid, reusedPage: null };
     }
   })();
@@ -266,16 +263,16 @@ async function clickFirst(
   const timeout = options?.timeout ?? 2000;
   const waitAfterClick = options?.waitAfterClick ?? true;
 
-  async function locateFirst(root: Page, selector: string): Promise<Locator | null> {
-    try {
-      const locator = root.locator(selector).first();
-      await locator.waitFor({ state: 'visible', timeout });
-      return locator;
-    } catch {
-      console.error(`locateFirst: not found in root for selector: ${selector}`);
-    }
-    return null;
+async function locateFirst(root: Page, selector: string): Promise<Locator | null> {
+  try {
+    const locator = root.locator(selector).first();
+    await locator.waitFor({ state: 'visible', timeout });
+    return locator;
+  } catch {
+    console.error(`locateFirst: not found in root for selector: ${selector}`);
   }
+  return null;
+}
 
   for (const sel of selectors) {
     const locator = await locateFirst(page, sel);
@@ -525,10 +522,8 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
   const { browser: b, context: initialContext, launchedPid, reusedPage } = await launchBrowser(headless);
   browserInstance = b;
   if (!b) {
-    // No usable browser available
     return { identifier: null, storageState: null, response: 'fail' };
   }
-  // Ensure we have a shared context so every session becomes a separate tab in the same browser.
   if (!sharedContext) {
     if (initialContext) sharedContext = initialContext;
     else if (b && typeof (b as any).newContext === 'function') {
@@ -538,16 +533,13 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
 
   const context = sharedContext || initialContext;
   if (!context) {
-    // Can't obtain a context to open a page
     return { identifier: null, storageState: null, response: 'fail' };
   }
 
-  // Create a fresh page (tab) inside the shared context so sessions are isolated to tabs.
   let page: Page;
   try {
     page = await context.newPage();
   } catch {
-    // Fallback to reusedPage only if new page creation fails
     if (reusedPage) {
       try { page = reusedPage; } catch { return { identifier: null, storageState: null, response: 'fail' }; }
     } else {
@@ -557,6 +549,10 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
   try {
     const url = 'https://www.giftcards.com.au/CheckBalance';
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    // Clear any leftover storage/inputs if we're reusing a page/context so we don't inherit a prior authenticated view.
+    try {
+      await page.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); (document.querySelectorAll('input') || []).forEach((i: any) => i.value = ''); } catch (e) {} });
+    } catch (_) {}
 
     const filledCard = cardNumber ? await fillInputs(page, cardNumber, pin || '') : false;
     if ((cardNumber && !filledCard)) {
@@ -579,6 +575,18 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
         return { identifier: null, storageState: null, response: 'fail' };
       }
     } catch (_) {}
+    
+    // Ensure the page actually shows a balance/transaction area (avoid reusing a stale/auth'd page that doesn't match input)
+    try {
+      const ready = await page.$('table.gift-card-summary__tableContent, #transaction-history, .card-balance, .balance, .balance-amount');
+      if (!ready) {
+        try { await closeSession({ browser: b, context, page, launchedPid }, { preserveBrowser: true }); } catch (_) {}
+        return { identifier: null, storageState: null, response: 'fail' };
+      }
+    } catch (_) {
+      try { await closeSession({ browser: b, context, page, launchedPid }, { preserveBrowser: true }); } catch (_) {}
+      return { identifier: null, storageState: null, response: 'fail' };
+    }
 
     const storageState = await context.storageState().catch(() => null);
     const identifier = randomBytes(4).toString('hex');
