@@ -4,13 +4,22 @@ import { launchChrome } from './launch_chrome';
 const cp = require('child_process');
 
 let browserInstance: Browser | null = null;
-let launchingPromise: Promise<{ browser: any; context: any; launchedPid: number | null; reusedPage?: Page | null } | { browser: null; context: null; launchedPid: number | null; reusedPage: null }> | null = null;
-let launchedPidGlobal: number | null = null;
-let sharedContext: BrowserContext | null = null;
-const sessionStore = new Map<string, { browser?: any; context: BrowserContext; page: Page; storageState?: any; verified?: boolean; cardNumber?: string | null; launchedPid?: number | null }>();
+// Each session gets its own context to ensure consistent behaviour across calls.
+
+interface SessionEntry {
+  browser?: Browser | any;
+  context: BrowserContext | null;
+  page?: Page | null;
+  storageState?: any;
+  verified?: boolean;
+  cardNumber?: string | null;
+  launchedPid?: number | null;
+}
+
+const sessionStore = new Map<string, SessionEntry>();
 
 // Safe close helper to reduce repeated disconnect/close patterns
-async function safeCloseBrowser(browser: any) {
+async function safeCloseBrowser(browser: Browser | any) {
   try {
     if (!browser) return;
     if (browser.disconnect) await browser.disconnect().catch(() => {});
@@ -19,21 +28,19 @@ async function safeCloseBrowser(browser: any) {
 }
 
 // Close a single session by object or by key. Deletes sessionStore entry when key is provided/found.
-export async function closeSession(sessionOrKey?: any, opts?: { preserveBrowser?: boolean }): Promise<void> {
+export async function closeSession(sessionOrKey?: string | SessionEntry, opts?: { preserveBrowser?: boolean }): Promise<void> {
   const preserveBrowser = opts?.preserveBrowser === true;
     try {
         if (!sessionOrKey) return;
-        let s: any = null;
+    let s: SessionEntry | null = null;
         let keyToDelete: string | null = null;
         if (typeof sessionOrKey === 'string') {
             keyToDelete = sessionOrKey;
-            s = sessionStore.get(sessionOrKey);
+      s = sessionStore.get(sessionOrKey) || null;
         } else {
             s = sessionOrKey;
         }
         if (!s) return;
-
-        // Attempt to clear local/session storage and cookies before closing.
         try {
             const page = s.page as Page | undefined;
             const context = s.context as BrowserContext | undefined;
@@ -44,11 +51,11 @@ export async function closeSession(sessionOrKey?: any, opts?: { preserveBrowser?
             }
 
             if (context && typeof (context as any).clearCookies === 'function') {
-                try { await (context as any).clearCookies(); } catch (_) {}
-            } else if (page && typeof (page as any).context === 'function') {
-                try {
-                    // @ts-ignore
-                    const client = await (page as any).context().newCDPSession(page);
+              try { await (context as any).clearCookies(); } catch (_) {}
+            } else if (page && typeof page.context === 'function') {
+              try {
+                // create CDP session from page's context
+                const client = await page.context().newCDPSession(page as any);
                     await client.send('Network.clearBrowserCookies');
                     try {
                         await client.send('Storage.clearDataForOrigin', { origin: 'https://portal.australiansuper.com', storageTypes: 'all' });
@@ -59,7 +66,7 @@ export async function closeSession(sessionOrKey?: any, opts?: { preserveBrowser?
 
         // Close page/context and optionally close browser and kill PID
         try { if (s.page) await s.page.close().catch(() => {}); } catch (_) {}
-        try { if (s.context && s.context !== sharedContext) await s.context.close().catch(() => {}); } catch (_) {}
+        try { if (s.context) await s.context.close().catch(() => {}); } catch (_) {}
 
         try {
             const shouldCloseBrowser = !preserveBrowser;
@@ -73,6 +80,14 @@ export async function closeSession(sessionOrKey?: any, opts?: { preserveBrowser?
             }
         } catch (_) {}
 
+        // If this session launched its own Chrome instance, attempt to kill that PID when closing
+        try {
+          const pid = (s && s.launchedPid) || null;
+          if (pid && !preserveBrowser) {
+            try { cp.execSync(`taskkill /PID ${pid} /T /F`); } catch (_) {}
+          }
+        } catch (_) {}
+
         if (keyToDelete) {
             try { sessionStore.delete(keyToDelete); } catch (_) {}
         } else {
@@ -83,132 +98,66 @@ export async function closeSession(sessionOrKey?: any, opts?: { preserveBrowser?
     } catch (_) {}
 }
 
-async function launchBrowser(headless = false): Promise<{ browser: any; context: any; launchedPid: number | null; reusedPage?: Page | null }> {
-  if (launchingPromise) {
-    return launchingPromise as Promise<{ browser: any; context: any; launchedPid: number | null; reusedPage?: Page | null }>;
+// Launch a dedicated Chrome instance for a session on an ephemeral port/profile.
+async function launchBrowserForSession(headless = false, userDataDir?: string): Promise<{ browser: Browser | null; context: BrowserContext | null; launchedPid: number | null; reusedPage?: Page | null; profile?: string }> {
+  // Pick a random port in a high range to avoid collisions with default 9222
+  const min = 9300;
+  const max = 9999;
+  const port = Math.floor(Math.random() * (max - min + 1)) + min;
+  const profile = userDataDir;
+  let launchedPid: number | null = null;
+  try {
+    launchedPid = launchChrome(process.env.CHROME_PATH, profile, port);
+    if (launchedPid) console.log(`Launched per-session Chrome (pid=${launchedPid}) on port ${port}`);
+  } catch (e) {
+    console.error('Error launching per-session Chrome:', e);
   }
 
-  launchingPromise = (async () => {
-    let browser: any = null;
-    let context: any = null;
-    let launchedPid: number | null = null;
-    let reusedPage: Page | null = null;
-
-    // Try to connect first without launching.
+  const start = Date.now();
+  const timeout = 10000;
+  let browser: Browser | null = null;
+  while (Date.now() - start < timeout) {
     try {
-      browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
-    } catch (_) {
-      browser = null;
-    }
-
-    if (browser) {
-      try {
-        const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
-        let nonBlankPages = 0;
-        for (const c of existingContexts) {
-          try {
-            const pages = (typeof c.pages === 'function' ? c.pages() : (c.pages || [])) as Page[];
-            for (const p of pages) {
-              try { const u = p.url(); if (u && u !== 'about:blank') nonBlankPages++; } catch (_) {}
-            }
-          } catch (_) {}
-        }
-
-        if (nonBlankPages === 0) {
-          await safeCloseBrowser(browser);
-          browser = null;
-        } else {
-          context = existingContexts.find((c: any) => {
-            try {
-              const pages = (typeof c.pages === 'function' ? c.pages() : (c.pages || [])) as Page[];
-              return pages.some((p: Page) => { try { const u = p.url(); return !!u && u !== 'about:blank'; } catch { return false; } });
-            } catch { return false; }
-          }) || existingContexts[0];
-          try { browserInstance = browser; } catch (_) {}
-          return { browser, context, launchedPid, reusedPage };
-        }
-      } catch (e) {
-        await safeCloseBrowser(browser);
-        browser = null;
-      }
-    }
-
-    try {
-      const exePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-      const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile';
-      try {
-        launchedPid = launchChrome(exePath, userDataDir, 9222);
-        if (launchedPid) {
-          launchedPidGlobal = launchedPid;
-          console.log(`Launched Chrome (pid=${launchedPid}), waiting for CDP...`);
-        }
-      } catch (e) {
-        console.error('Error invoking launchChrome:', e);
-      }
+      browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+      break;
     } catch (e) {
-      console.error('Error preparing to launch Chrome:', e);
+      await new Promise(r => setTimeout(r, 300));
     }
+  }
 
-    const start = Date.now();
-    const timeout = 10000;
-    while (Date.now() - start < timeout) {
-      try {
-        browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
-        break;
-      } catch (e) {
-        await new Promise(r => setTimeout(r, 500));
-      }
+  if (!browser) {
+    // Failed to connect; try to kill launched pid
+    if (launchedPid) {
+      try { cp.execSync(`taskkill /PID ${launchedPid} /T /F`); } catch (_) {}
     }
-
-    if (!browser) {
-      return { browser: null, context: null, launchedPid, reusedPage: null };
-    }
-
-    try {
-      const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
-      if (existingContexts && existingContexts.length) {
-        const contextWithNonBlank = existingContexts.find((c: any) => {
-          try {
-            const pages = (typeof c.pages === 'function' ? c.pages() : (c.pages || [])) as Page[];
-            return pages.some((p: Page) => { try { const u = p.url(); return !!u && u !== 'about:blank'; } catch { return false; } });
-          } catch { return false; }
-        });
-        if (!contextWithNonBlank) {
-          try { await safeCloseBrowser(browser); } catch (_) {}
-          return { browser: null, context: null, launchedPid, reusedPage: null };
-        }
-        context = contextWithNonBlank || existingContexts[0];
-        try {
-          const pages = (typeof context.pages === 'function' ? context.pages() : (context.pages || [])) as Page[];
-          if (pages && pages.length) {
-            const nonBlank = pages.find(p => { try { const u = p.url(); return !!u && u !== 'about:blank'; } catch { return false; } });
-            const blank = pages.find(p => { try { const u = p.url(); return !u || u === 'about:blank'; } catch { return false; } });
-            reusedPage = nonBlank || blank || pages[0];
-          }
-        } catch (_) {}
-      } else {
-        await safeCloseBrowser(browser);
-        return { browser: null, context: null, launchedPid, reusedPage: null };
-      }
-      try { browserInstance = browser; } catch (_) {}
-      return { browser, context, launchedPid, reusedPage };
-    } catch (e) {
-      await safeCloseBrowser(browser);
-      return { browser: null, context: null, launchedPid, reusedPage: null };
-    }
-  })();
+    return { browser: null, context: null, launchedPid: null, reusedPage: null, profile };
+  }
 
   try {
-    return await launchingPromise as { browser: any; context: any; launchedPid: number | null; reusedPage?: Page | null };
-  } finally {
-    launchingPromise = null;
+    const existingContexts = typeof (browser as Browser).contexts === 'function' ? (browser as Browser).contexts() : [];
+    if (!existingContexts || !existingContexts.length) {
+      try { await safeCloseBrowser(browser); } catch (_) {}
+      if (launchedPid) { try { cp.execSync(`taskkill /PID ${launchedPid} /T /F`); } catch (_) {} }
+      return { browser: null, context: null, launchedPid: null, reusedPage: null, profile };
+    }
+    const context = existingContexts[0];
+    let reusedPage: Page | null = null;
+    try {
+      const pages = (typeof context.pages === 'function' ? context.pages() : (context.pages || [])) as Page[];
+      if (pages && pages.length) reusedPage = pages[0];
+    } catch (_) {}
+    return { browser, context, launchedPid, reusedPage, profile };
+  } catch (e) {
+    await safeCloseBrowser(browser);
+    if (launchedPid) { try { cp.execSync(`taskkill /PID ${launchedPid} /T /F`); } catch (_) {} }
+    return { browser: null, context: null, launchedPid: null, reusedPage: null, profile };
   }
 }
 
 async function findAndFill(page: Page, selectors: string[], value: string) {
-  async function Fill(locator: any) {
+  async function Fill(locator: Locator) {
     const strategies = [
-      async (loc: any) => { await loc.type(value, { delay: 20 }); },
+      async (loc: Locator) => { await loc.type(value, { delay: 20 }); },
     ];
 
     for (const strat of strategies) {
@@ -220,7 +169,7 @@ async function findAndFill(page: Page, selectors: string[], value: string) {
         } 
         console.warn(`value mismatch after fill. Expected "${value}", got "${actual}"`);
       } catch (err) {
-        const msg = err && ((err as any).message || String(err)) || 'unknown error';
+        const msg = err && (((err as Error).message) || String(err)) || 'unknown error';
         console.error(`Fill failed — ${msg}`);
       }
     }
@@ -337,7 +286,7 @@ function parseDateToIso(s: string | null): string | null {
   return null;
 }
 
-async function cleanedCellText(locator: any) {
+async function cleanedCellText(locator: Locator): Promise<string | null> {
   try {
     return await locator.evaluate((el: HTMLElement) => {
       const hdrs = el.querySelectorAll('.table-responsive-stack-thead');
@@ -349,9 +298,7 @@ async function cleanedCellText(locator: any) {
 }
 
 interface Transaction {
-  // Original parsed ISO date (kept for compatibility)
   date: string | null;
-  // Optional fields aligned with GraphQL `transaction` schema
   transactionId?: string | null;
   transactionTime?: string | null;
   description: string | null;
@@ -376,13 +323,6 @@ const SELECTORS = {
 };
 
 const RECAPTCHA_IFRAME = 'iframe[title="reCAPTCHA"]';
-
-const SUBMIT_SELECTORS = [
-  'button[type=submit]',
-  'input[type=submit]',
-  'button:has-text("Check balance")',
-  'button',
-];
 
 async function fillInputs(page: Page, cardNumber: string, pin: string): Promise<boolean> {
   const filledCard = await findAndFill(page, SELECTORS.card, cardNumber);
@@ -433,7 +373,6 @@ async function solveRecaptchaAndSubmit(page: Page): Promise<boolean> {
       await page.bringToFront();
       await highlightRecaptcha(page);
       const timeout = 30 * 1000; 
-
       const interval = 1000;
       const start = Date.now();
       while (Date.now() - start < timeout) {
@@ -453,7 +392,7 @@ async function solveRecaptchaAndSubmit(page: Page): Promise<boolean> {
         await new Promise(r => setTimeout(r, interval));
       }
     }
-    const clicked = await clickFirst(page, SUBMIT_SELECTORS);
+    const clicked = await clickFirst(page, SELECTORS.submit);
     if (!clicked) {
       console.warn('solveRecaptchaAndSubmit: submit click failed or no navigation detected');
       return false;
@@ -518,20 +457,18 @@ async function extractTransactions(page: Page): Promise<Transaction[]> {
   return transactions;
 }
 
-export async function requestSession(cardNumber?: string, pin?: string, headless = false): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
-  const { browser: b, context: initialContext, launchedPid, reusedPage } = await launchBrowser(headless);
+export async function requestSession(cardNumber?: string, pin?: string, headless = false, userDataDir?: string): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
+  // Launch a dedicated browser instance for this session so each user gets a separate PID/profile
+  const { browser: b, context: initialContext, launchedPid, reusedPage } = await launchBrowserForSession(headless, userDataDir);
   browserInstance = b;
   if (!b) {
     return { identifier: null, storageState: null, response: 'fail' };
   }
-  if (!sharedContext) {
-    if (initialContext) sharedContext = initialContext;
-    else if (b && typeof (b as any).newContext === 'function') {
-      try { sharedContext = await (b as any).newContext(); } catch { sharedContext = null; }
-    }
+  // Prefer context returned by the launcher; if not present, create a new per-session context.
+  let context = initialContext;
+  if (!context && b && typeof (b as any).newContext === 'function') {
+    try { context = await (b as any).newContext(); } catch { context = null; }
   }
-
-  const context = sharedContext || initialContext;
   if (!context) {
     return { identifier: null, storageState: null, response: 'fail' };
   }
@@ -556,13 +493,13 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
 
     const filledCard = cardNumber ? await fillInputs(page, cardNumber, pin || '') : false;
     if ((cardNumber && !filledCard)) {
-      try { await closeSession({ browser: b, context, page, launchedPid }, { preserveBrowser: true }); } catch (_) {}
+      try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
       return { identifier: null, storageState: null, response: 'fail' };
     }
 
     const submitted = await solveRecaptchaAndSubmit(page).catch(() => false);
     if (!submitted) {
-      try { await closeSession({ browser: b, context, page, launchedPid }, { preserveBrowser: true }); } catch (_) {}
+      try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
       return { identifier: null, storageState: null, response: 'fail' };
     }
 
@@ -571,7 +508,7 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
     try {
       const html = await page.content().catch(() => '');
       if (html && html.indexOf('Sorry, an error occurred while processing your request.') !== -1) {
-        try { await closeSession({ browser: b, context, page, launchedPid }, { preserveBrowser: true }); } catch (_) {}
+        try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
         return { identifier: null, storageState: null, response: 'fail' };
       }
     } catch (_) {}
@@ -580,20 +517,20 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
     try {
       const ready = await page.$('table.gift-card-summary__tableContent, #transaction-history, .card-balance, .balance, .balance-amount');
       if (!ready) {
-        try { await closeSession({ browser: b, context, page, launchedPid }, { preserveBrowser: true }); } catch (_) {}
+        try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
         return { identifier: null, storageState: null, response: 'fail' };
       }
     } catch (_) {
-      try { await closeSession({ browser: b, context, page, launchedPid }, { preserveBrowser: true }); } catch (_) {}
+      try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
       return { identifier: null, storageState: null, response: 'fail' };
     }
 
     const storageState = await context.storageState().catch(() => null);
     const identifier = randomBytes(4).toString('hex');
-    sessionStore.set(identifier, { context, page, verified: true, cardNumber: cardNumber ? cardNumber.replace(/\D/g, '') : null, browser: b, launchedPid: launchedPidGlobal });
+    sessionStore.set(identifier, { context, page, verified: true, cardNumber: cardNumber ? cardNumber.replace(/\D/g, '') : null, browser: b, launchedPid });
     return { identifier, storageState, response: 'success' };
   } catch (e) {
-    try { await closeSession({ browser: b, context, page, launchedPid }, { preserveBrowser: true }); } catch (_) {}
+    try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
     return { identifier: null, storageState: null, response: 'fail' };
   }
 }
@@ -611,7 +548,7 @@ export async function queryWithSession(storageIdentifier: any): Promise<GiftCard
   }
 
   if (!identifier || !sessionStore.has(identifier)) return null;
-  const stored = sessionStore.get(identifier) as any;
+  const stored = sessionStore.get(identifier) as SessionEntry | undefined;
   if (!stored || stored.verified !== true) return null;
   const page = stored.page;
   await page.bringToFront?.().catch(() => {});
@@ -620,7 +557,7 @@ export async function queryWithSession(storageIdentifier: any): Promise<GiftCard
     const { balance, expiryDate } = await extractBalance(stored.page);
     const txs = await extractTransactions(stored.page);
 
-    const transactions = Array.isArray(txs) ? txs.map((t: any) => ({
+    const transactions = Array.isArray(txs) ? txs.map((t: Transaction) => ({
       transactionTime: t.transactionTime || null,
       date: t.date || null,
       description: t.description || null,
@@ -630,7 +567,7 @@ export async function queryWithSession(storageIdentifier: any): Promise<GiftCard
     })) : [];
 
     const result: GiftCardResult = {
-      balance: typeof balance === 'number' ? balance : parseNumFromString((balance as any) || null),
+      balance: typeof balance === 'number' ? balance : parseNumFromString(typeof balance === 'string' ? balance : (balance == null ? null : String(balance))),
       currency: 'AUD',
       cardNumber: stored.cardNumber || null,
       expiryDate: expiryDate || null,
@@ -639,35 +576,10 @@ export async function queryWithSession(storageIdentifier: any): Promise<GiftCard
     };
 
     try { if (result && result.cardNumber == null) result.cardNumber = stored.cardNumber ?? null; } catch (_) {}
-    try { await closeSession(stored, { preserveBrowser: true }); } catch (_) {}
+    try { await closeSession(stored); } catch (_) {}
     try { sessionStore.delete(identifier); } catch (_) {}
     return result;
   } catch (e) {
     return null;
-  }
-}
-
-export async function shutdownGlobalBrowserIfNoSessions(): Promise<void> {
-  try {
-    if (sessionStore.size === 0 && browserInstance) {
-      try {
-        if ((browserInstance as any).disconnect) await (browserInstance as any).disconnect().catch(() => {});
-        else await (browserInstance as any).close().catch(() => {});
-      } catch (_) {}
-
-      try {
-        if (launchedPidGlobal) {
-          cp.execSync(`taskkill /PID ${launchedPidGlobal} /T /F`);
-        }
-      } catch (e) {
-        // ignore kill errors
-      }
-      browserInstance = null;
-      launchedPidGlobal = null;
-      sharedContext = null;
-      console.log('[shutdown] global browser closed');
-    }
-  } catch (e) {
-    console.error('shutdownGlobalBrowserIfNoSessions error:', e);
   }
 }

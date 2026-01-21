@@ -2,39 +2,66 @@ import { ApolloServer} from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
-import { requestSession, queryWithSession, shutdownGlobalBrowserIfNoSessions } from './giftcard';
+import { requestSession, queryWithSession } from './giftcard';
 
 // Concurrency / queueing: allow up to 3 concurrent active sessions;
 // additional auth requests are queued FIFO until a slot becomes available.
 const MAX_CONCURRENT = 3;
-let activeCount = 0;
-const waitQueue: Array<() => void> = [];
+const SLOT_PROFILES = [
+  'C:\\pw-chrome-profile_1',
+  'C:\\pw-chrome-profile_2',
+  'C:\\pw-chrome-profile_3'
+];
+const activeSlots: boolean[] = new Array(MAX_CONCURRENT).fill(false);
+const waitQueue: Array<(slotIndex: number) => void> = [];
 
-function acquireSlot(): Promise<void> {
-  if (activeCount < MAX_CONCURRENT) {
-    activeCount++;
-    console.log(`[slot] acquire -> active=${activeCount}`);
-    return Promise.resolve();
+function acquireSlot(): Promise<number> {
+  const freeIndex = activeSlots.findIndex(v => !v);
+  if (freeIndex !== -1) {
+    activeSlots[freeIndex] = true;
+    const activeCount = activeSlots.filter(Boolean).length;
+    console.log(`[slot] acquire -> index=${freeIndex} active=${activeCount}`);
+    return Promise.resolve(freeIndex);
   }
   return new Promise((resolve) => {
     waitQueue.push(resolve);
+    const activeCount = activeSlots.filter(Boolean).length;
     console.log(`[slot] queued -> active=${activeCount}, queue=${waitQueue.length}`);
   });
 }
 
-function releaseSlot() {
-  if (activeCount <= 0) return;
-  activeCount--;
-  console.log(`[slot] release -> active=${activeCount}`);
-  const next = waitQueue.shift();
-  if (next) {
-    activeCount++;
-    console.log(`[slot] handoff -> active=${activeCount}`);
-    try { next(); } catch (e) { /* ignore */ }
-  }
-  // If there are no active slots after release and no queued handoff, shut down global browser.
-  if (activeCount === 0) {
-    shutdownGlobalBrowserIfNoSessions().catch((e: any) => console.error('shutdown error:', e));
+function releaseSlot(slotIndex?: number) {
+  try {
+    if (typeof slotIndex === 'number' && slotIndex >= 0 && slotIndex < activeSlots.length) {
+      const next = waitQueue.shift();
+      if (next) {
+        // hand off this slot to the next waiter
+        try { next(slotIndex); } catch (e) { /* ignore */ }
+        const activeCount = activeSlots.filter(Boolean).length;
+        console.log(`[slot] handoff -> index=${slotIndex} active=${activeCount}`);
+        return;
+      }
+      // no queued waiters — mark slot free
+      activeSlots[slotIndex] = false;
+      const activeCount = activeSlots.filter(Boolean).length;
+      console.log(`[slot] release -> index=${slotIndex} active=${activeCount}`);
+    } else {
+      // fallback: if no slotIndex provided, try to free the first occupied slot
+      const idx = activeSlots.findIndex(v => v);
+      if (idx === -1) return;
+      const next = waitQueue.shift();
+      if (next) {
+        try { next(idx); } catch (e) { /* ignore */ }
+        const activeCount = activeSlots.filter(Boolean).length;
+        console.log(`[slot] handoff -> index=${idx} active=${activeCount}`);
+        return;
+      }
+      activeSlots[idx] = false;
+      const activeCount = activeSlots.filter(Boolean).length;
+      console.log(`[slot] release -> index=${idx} active=${activeCount}`);
+    }
+  } catch (e) {
+    console.error('releaseSlot error:', e);
   }
 }
 
@@ -137,32 +164,35 @@ const resolvers = {
     auth: async (_: any, { payload }: { payload: any }, context: any) => {
       try {
         const { id, pin } = payload || {};
+        let assignedSlot: number | null = null;
 
         if (id && pin) {
-          await acquireSlot();
+          assignedSlot = await acquireSlot();
           try {
-            const res = await requestSession(id, pin, false);
+            const userDataDir = SLOT_PROFILES[assignedSlot] || undefined;
+            const res = await requestSession(id, pin, false, userDataDir);
             if (res && res.response === 'success' && res.identifier) {
-              sessions.set(res.identifier, { slotHeld: true, createdAt: Date.now() });
+              sessions.set(res.identifier, { slotHeld: true, createdAt: Date.now(), slotIndex: assignedSlot });
               return { response: res.response, identifier: res.identifier };
             }
             // request failed, release reserved slot
-            releaseSlot();
+            releaseSlot(assignedSlot);
             return { response: 'fail', identifier: null };
           } catch (e: any) {
-            releaseSlot();
+            releaseSlot(assignedSlot);
             return { response:'fail', identifier: null };
           }
         }
       } catch (err: any) {
-          releaseSlot();
+          // Only release if we earlier reserved a slot
+          try { if ((err as any) && false) {} } catch (_) {}
           return { response:'fail', identifier: null };
       }
     }
   }
 };
 
-type HeldSession = { slotHeld: boolean; createdAt: number };
+type HeldSession = { slotHeld: boolean; createdAt: number; slotIndex?: number };
 const sessions = new Map<string, HeldSession>();
 
 async function start() {
@@ -184,9 +214,9 @@ async function start() {
               if (!id) return;
               const s = sessions.get(id);
               if (!s || !s.slotHeld) return;
-              sessions.delete(id);
-              releaseSlot();
-              console.log(`[slot] session=${id} released & cleared`);
+                  sessions.delete(id);
+                  try { if (typeof s.slotIndex === 'number') releaseSlot(s.slotIndex); else releaseSlot(); } catch (_) { releaseSlot(); }
+                  console.log(`[slot] session=${id} released & cleared`);
             }
           };
         }
@@ -203,7 +233,7 @@ setInterval(() => {
     if (now - s.createdAt > 30_000) {
       console.warn(`[slot] force release expired session ${id}`);
       sessions.delete(id);
-      releaseSlot();
+      try { if (typeof s.slotIndex === 'number') releaseSlot(s.slotIndex); else releaseSlot(); } catch (_) { releaseSlot(); }
     }
   }
 }, 10_000);
