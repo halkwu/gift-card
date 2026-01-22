@@ -25,7 +25,7 @@ query GetBalanceAndTxs($identifier: String!) {
 const authMutation = `mutation Auth($payload: JSON) { auth(payload: $payload) { response identifier } }`;
 
 const SHARED_VARS = {
-  id: __ENV.ID || '62734010275110915',
+  id: __ENV.ID || '62734010275110916',
   pin: __ENV.PIN || '2170'
 };
 

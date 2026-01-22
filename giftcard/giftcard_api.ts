@@ -10,7 +10,7 @@ const MAX_CONCURRENT = 3;
 const SLOT_PROFILES = [
   'C:\\pw-chrome-profile_1',
   'C:\\pw-chrome-profile_2',
-  'C:\\pw-chrome-profile_3'
+  'C:\\pw-chrome-profile_3',
 ];
 const activeSlots: boolean[] = new Array(MAX_CONCURRENT).fill(false);
 const waitQueue: Array<(slotIndex: number) => void> = [];

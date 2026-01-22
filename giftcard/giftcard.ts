@@ -20,23 +20,22 @@ const sessionStore = new Map<string, SessionEntry>();
 
 // Safe close helper to reduce repeated disconnect/close patterns
 async function safeCloseBrowser(browser: Browser | any) {
-  try {
-    if (!browser) return;
-    if (browser.disconnect) await browser.disconnect().catch(() => {});
-    else await browser.close().catch(() => {});
-  } catch (_) {}
+    try {
+        if (!browser) return;
+        if (browser.disconnect) await browser.disconnect().catch(() => {});
+        else await browser.close().catch(() => {});
+    } catch (_) {}
 }
 
-// Close a single session by object or by key. Deletes sessionStore entry when key is provided/found.
 export async function closeSession(sessionOrKey?: string | SessionEntry, opts?: { preserveBrowser?: boolean }): Promise<void> {
-  const preserveBrowser = opts?.preserveBrowser === true;
+    const preserveBrowser = opts?.preserveBrowser === true;
     try {
         if (!sessionOrKey) return;
-    let s: SessionEntry | null = null;
+        let s: SessionEntry | null = null;
         let keyToDelete: string | null = null;
         if (typeof sessionOrKey === 'string') {
             keyToDelete = sessionOrKey;
-      s = sessionStore.get(sessionOrKey) || null;
+            s = sessionStore.get(sessionOrKey) || null;
         } else {
             s = sessionOrKey;
         }
@@ -45,17 +44,14 @@ export async function closeSession(sessionOrKey?: string | SessionEntry, opts?: 
             const page = s.page as Page | undefined;
             const context = s.context as BrowserContext | undefined;
             if (page) {
-                try {
-                    await page.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} });
-                } catch (_) {}
+                try { await page.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} }); } catch (_) {}
             }
 
             if (context && typeof (context as any).clearCookies === 'function') {
-              try { await (context as any).clearCookies(); } catch (_) {}
+                try { await (context as any).clearCookies(); } catch (_) {}
             } else if (page && typeof page.context === 'function') {
-              try {
-                // create CDP session from page's context
-                const client = await page.context().newCDPSession(page as any);
+                try {
+                    const client = await page.context().newCDPSession(page as any);
                     await client.send('Network.clearBrowserCookies');
                     try {
                         await client.send('Storage.clearDataForOrigin', { origin: 'https://portal.australiansuper.com', storageTypes: 'all' });
@@ -64,28 +60,24 @@ export async function closeSession(sessionOrKey?: string | SessionEntry, opts?: 
             }
         } catch (_) {}
 
-        // Close page/context and optionally close browser and kill PID
         try { if (s.page) await s.page.close().catch(() => {}); } catch (_) {}
         try { if (s.context) await s.context.close().catch(() => {}); } catch (_) {}
 
         try {
             const shouldCloseBrowser = !preserveBrowser;
-
             if (s.browser && shouldCloseBrowser) {
                 if (s.browser.disconnect) await s.browser.disconnect().catch(() => {});
                 else await s.browser.close().catch(() => {});
             } else if (s.browser && !shouldCloseBrowser) {
-                // keep browser running; only attempt to disconnect local references
                 try { if (s.browser.disconnect) await s.browser.disconnect().catch(() => {}); } catch (_) {}
             }
         } catch (_) {}
 
-        // If this session launched its own Chrome instance, attempt to kill that PID when closing
         try {
-          const pid = (s && s.launchedPid) || null;
-          if (pid && !preserveBrowser) {
-            try { cp.execSync(`taskkill /PID ${pid} /T /F`); } catch (_) {}
-          }
+            const pid = (s && s.launchedPid) || null;
+            if (pid && !preserveBrowser) {
+                try { cp.execSync(`taskkill /PID ${pid} /T /F`); } catch (_) {}
+            }
         } catch (_) {}
 
         if (keyToDelete) {
@@ -98,7 +90,6 @@ export async function closeSession(sessionOrKey?: string | SessionEntry, opts?: 
     } catch (_) {}
 }
 
-// Launch a dedicated Chrome instance for a session on an ephemeral port/profile.
 async function launchBrowserForSession(headless = false, userDataDir?: string): Promise<{ browser: Browser | null; context: BrowserContext | null; launchedPid: number | null; reusedPage?: Page | null; profile?: string }> {
   // Pick a random port in a high range to avoid collisions with default 9222
   const min = 9300;
@@ -458,7 +449,6 @@ async function extractTransactions(page: Page): Promise<Transaction[]> {
 }
 
 export async function requestSession(cardNumber?: string, pin?: string, headless = false, userDataDir?: string): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
-  // Launch a dedicated browser instance for this session so each user gets a separate PID/profile
   const { browser: b, context: initialContext, launchedPid, reusedPage } = await launchBrowserForSession(headless, userDataDir);
   browserInstance = b;
   if (!b) {
@@ -483,53 +473,68 @@ export async function requestSession(cardNumber?: string, pin?: string, headless
       return { identifier: null, storageState: null, response: 'fail' };
     }
   }
+
   try {
-    const url = 'https://www.giftcards.com.au/CheckBalance';
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    // Clear any leftover storage/inputs if we're reusing a page/context so we don't inherit a prior authenticated view.
-    try {
-      await page.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); (document.querySelectorAll('input') || []).forEach((i: any) => i.value = ''); } catch (e) {} });
-    } catch (_) {}
+    await page.goto('https://www.giftcards.com.au/CheckBalance', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
+    const filled = cardNumber && pin
+      ? await fillInputs(page, cardNumber, pin || '')
+      : false;
 
-    const filledCard = cardNumber ? await fillInputs(page, cardNumber, pin || '') : false;
-    if ((cardNumber && !filledCard)) {
-      try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
+    if (cardNumber && !filled) {
+      await closeSession({ browser: b, context, page, launchedPid });
       return { identifier: null, storageState: null, response: 'fail' };
     }
 
-    const submitted = await solveRecaptchaAndSubmit(page).catch(() => false);
+    const submitted = await solveRecaptchaAndSubmit(page);
     if (!submitted) {
-      try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
+      await closeSession({ browser: b, context, page, launchedPid });
       return { identifier: null, storageState: null, response: 'fail' };
     }
 
-    await page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 8000 }).catch(() => null);
-    // Detect generic error page that returns a 'Sorry, an error occurred...' message
     try {
-      const html = await page.content().catch(() => '');
-      if (html && html.indexOf('Sorry, an error occurred while processing your request.') !== -1) {
-        try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
+      await Promise.race([
+        page.waitForURL('**CheckBalance/TransactionHistory**', { timeout: 8000 }),
+        page.waitForSelector(
+          'table.gift-card-summary__tableContent, #transaction-history, .card-balance, .balance, .balance-amount',
+          { timeout: 8000 }
+        )
+      ]);
+    } catch (_) {}
+
+    try {
+      const html = await page.content();
+      if (html.includes('Sorry, an error occurred while processing your request.')) {
+        await closeSession({ browser: b, context, page, launchedPid });
         return { identifier: null, storageState: null, response: 'fail' };
       }
     } catch (_) {}
-    
-    // Ensure the page actually shows a balance/transaction area (avoid reusing a stale/auth'd page that doesn't match input)
-    try {
-      const ready = await page.$('table.gift-card-summary__tableContent, #transaction-history, .card-balance, .balance, .balance-amount');
-      if (!ready) {
-        try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
-        return { identifier: null, storageState: null, response: 'fail' };
-      }
-    } catch (_) {
-      try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
+
+    const ready = await page.$(
+      'table.gift-card-summary__tableContent, #transaction-history, .card-balance, .balance, .balance-amount'
+    );
+    if (!ready) {
+      await closeSession({ browser: b, context, page, launchedPid });
       return { identifier: null, storageState: null, response: 'fail' };
     }
-
-    const storageState = await context.storageState().catch(() => null);
+    const storageState = await context.storageState();
     const identifier = randomBytes(4).toString('hex');
-    sessionStore.set(identifier, { context, page, verified: true, cardNumber: cardNumber ? cardNumber.replace(/\D/g, '') : null, browser: b, launchedPid });
+
+    sessionStore.set(identifier, {
+      browser: b,
+      context,
+      page,
+      storageState,
+      verified: true,
+      cardNumber: cardNumber,
+      launchedPid
+    });
+
     return { identifier, storageState, response: 'success' };
   } catch (e) {
+    console.error('requestSession error:', e);
     try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
     return { identifier: null, storageState: null, response: 'fail' };
   }
