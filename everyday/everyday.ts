@@ -26,6 +26,19 @@ const SELECTORS = {
   submit: ['button:has-text("Check balance")', 'button:has-text("Check Balance")']
 };
 
+let browserInstance: Browser | null = null;
+const sessionStore = new Map<string, { context: BrowserContext; page: Page; verified?: boolean; cardNumber?: string | null }>();
+
+async function ensureBrowser(headless = true): Promise<Browser> {
+  if (!browserInstance) {
+    browserInstance = await chromium.launch({ headless });
+    process.on('exit', async () => {
+      try { await browserInstance?.close(); } catch (_) {}
+    });
+  }
+  return browserInstance;
+}
+
 async function findAndFill(page: Page, selectors: string[], value: string) {
   async function Fill(locator: any) {
     const strategies = [
@@ -167,20 +180,6 @@ function attachBalances(obj: any) {
   }
   obj.transactions = tx;
   return obj;
-}
-
-// --- Shared browser/session management ---
-let browserInstance: Browser | null = null;
-const sessionStore = new Map<string, { context: BrowserContext; page: Page; verified?: boolean; cardNumber?: string | null }>();
-
-async function ensureBrowser(headless = true): Promise<Browser> {
-  if (!browserInstance) {
-    browserInstance = await chromium.launch({ headless });
-    process.on('exit', async () => {
-      try { await browserInstance?.close(); } catch (_) {}
-    });
-  }
-  return browserInstance;
 }
 
 function transformResult(obj: any): GiftCardResult | null {
@@ -338,31 +337,3 @@ export async function queryWithSession(storageIdentifier: any): Promise<GiftCard
     }
   }
 
-// async function main() {
-//   const argv: string[] = process.argv.slice(2);
-//   if (argv.length < 2) {
-//     console.log('Usage: ts-node everyday.ts <cardNumber> <pin> [--mode=headless|headed]');
-//     await new Promise<void>(resolve => { process.stdin.resume(); process.stdin.once('data', () => resolve()); });
-//     return;
-//   }
-//   const card = argv[0];
-//   const pin = argv[1];
-//   const modeArg = argv.find(a => a.startsWith('--mode='));
-//   const headless = modeArg ? modeArg.split('=')[1] === 'headless' : false;
-
-//   try {
-//     const details = await GetResult(card, pin, headless);
-//     if (!details) {
-//       console.error(JSON.stringify({ error: 'no details returned' }));
-//       process.exitCode = 1;
-//       return;
-//     }
-//     console.log(JSON.stringify(details, null, 2));
-//   } catch (err) {
-//     console.error(JSON.stringify({ error: String(err) }));
-//     process.exitCode = 1;
-//     return;
-//   }
-// }
-
-// if (require.main === module) main();

@@ -4,7 +4,6 @@ import { launchChrome } from './launch_chrome';
 const cp = require('child_process');
 
 let browserInstance: Browser | null = null;
-// Each session gets its own context to ensure consistent behaviour across calls.
 
 interface SessionEntry {
   browser?: Browser | any;
@@ -16,9 +15,35 @@ interface SessionEntry {
   launchedPid?: number | null;
 }
 
+interface Transaction {
+  date: string | null;
+  transactionId?: string | null;
+  transactionTime?: string | null;
+  description: string | null;
+  amount: number | null;
+  balance: number | null;
+  currency: string;
+}
+
+interface GiftCardResult {
+  balance: number | null;
+  currency: string;
+  cardNumber: string | null;
+  expiryDate: string | null;
+  purchases: number;
+  transactions: Transaction[];
+}
+
+const SELECTORS = {
+  card: ['#cardNumber', 'input[name*=card]', 'input[placeholder*=Card]'],
+  pin: ['#cardPIN', '#pin', 'input[name*=pin]', 'input[placeholder*=PIN]'],
+  submit: ['button[type=submit]', 'input[type=submit]', 'button:has-text("Check balance")']
+};
+
+const RECAPTCHA_IFRAME = 'iframe[title="reCAPTCHA"]';
+
 const sessionStore = new Map<string, SessionEntry>();
 
-// Safe close helper to reduce repeated disconnect/close patterns
 async function safeCloseBrowser(browser: Browser | any) {
     try {
         if (!browser) return;
@@ -27,7 +52,7 @@ async function safeCloseBrowser(browser: Browser | any) {
     } catch (_) {}
 }
 
-export async function closeSession(sessionOrKey?: string | SessionEntry, opts?: { preserveBrowser?: boolean }): Promise<void> {
+async function closeSession(sessionOrKey?: string | SessionEntry, opts?: { preserveBrowser?: boolean }): Promise<void> {
     const preserveBrowser = opts?.preserveBrowser === true;
     try {
         if (!sessionOrKey) return;
@@ -287,33 +312,6 @@ async function cleanedCellText(locator: Locator): Promise<string | null> {
     }) as string || null;
   } catch (e) { return null; }
 }
-
-interface Transaction {
-  date: string | null;
-  transactionId?: string | null;
-  transactionTime?: string | null;
-  description: string | null;
-  amount: number | null;
-  balance: number | null;
-  currency: string;
-}
-
-interface GiftCardResult {
-  balance: number | null;
-  currency: string;
-  cardNumber: string | null;
-  expiryDate: string | null;
-  purchases: number;
-  transactions: Transaction[];
-}
-
-const SELECTORS = {
-  card: ['#cardNumber', 'input[name*=card]', 'input[placeholder*=Card]'],
-  pin: ['#cardPIN', '#pin', 'input[name*=pin]', 'input[placeholder*=PIN]'],
-  submit: ['button[type=submit]', 'input[type=submit]', 'button:has-text("Check balance")']
-};
-
-const RECAPTCHA_IFRAME = 'iframe[title="reCAPTCHA"]';
 
 async function fillInputs(page: Page, cardNumber: string, pin: string): Promise<boolean> {
   const filledCard = await findAndFill(page, SELECTORS.card, cardNumber);
