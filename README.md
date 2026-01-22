@@ -143,4 +143,4 @@ You can use `k6_test.js` to perform load and integration testing on your GraphQL
 **Run the test with:**
 
 ```bash
-C:\Users\Halk\Desktop\k6\k6-v1.5.0-windows-amd64\k6.exe run .\k6_test.js
+k6\k6-v1.5.0-windows-amd64\k6.exe run .\k6_test.js
